@@ -93,7 +93,8 @@ function caveAt(x, y, z){
 
 // ---------- 体素存储（无限世界） ----------
 const PALETTE = {
-  grass: 0x6ab04c, dirt: 0x8a5a2b, stone: 0x8d949c, sand: 0xe2cf8a,
+  grass: 0x6ab04c, dirt: 0x8a5a2b, stone: 0x8d949c, iron: 0xb0b8c0, gold: 0xffd24a,
+  diamond: 0x6ffcff, coal: 0x33373d, sand: 0xe2cf8a,
   water: 0x3a7bd5, lava: 0xe05626, wood: 0x9c6b3f, leaf: 0x3f8f3f, snow: 0xeaf2f7
 };
 const CHUNK = 16;          // 区块边长（列数）
@@ -121,6 +122,12 @@ function voxelColor(x, y, z){
   }
   if(y >= h - 2) return (h <= WATER + 1) ? PALETTE.sand : PALETTE.dirt;
   if(cavesOn && y < h - 1 && caveAt(x, y, z)) return null;   // 石层中用 3D 噪声雕刻洞穴
+  // 矿石：石层中按深度 + 3D 噪声生成（越深越稀有/贵重），与洞穴不冲突
+  const n = fbm3(x * 0.6 + 2.3, y * 0.6 + 4.1, z * 0.6 + 7.7);
+  if(y < h - 5 && n > 0.6) return PALETTE.diamond;   // 最深：钻石（最稀）
+  if(y < h - 3 && n > 0.45) return PALETTE.gold;     // 较深：金（少）
+  if(n > 0.35) return PALETTE.iron;                  // 普遍：铁（约 15%）
+  if(n < -0.7) return PALETTE.coal;                 // 煤炭（约 3%）
   return PALETTE.stone;
 }
 
