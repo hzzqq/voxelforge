@@ -108,6 +108,55 @@ let edits = new Map();     // "x,y,z" -> 颜色值 或 null(挖空)
 let chunks = new Map();    // "cx,cz" -> { mesh }
 const key = (x,y,z) => x + ',' + y + ',' + z;
 const ckey = (cx,cz) => cx+','+cz;
+const wkey = (x,z) => x + ',' + z;                 // 水体状态用「列」坐标
+
+// ---------- 水体流动（简单元胞流体：表面均衡 + 体积守恒）----------
+// water: Map<"x,z", 水面y(整数)>；t(x,z): 返回该列地形顶高度。
+// 每步：有水格把水分给「更低」的 4 邻（含干涸但更低的地面），直到相邻表面趋于一致；体积严格守恒。
+const MAX_WATER_DEPTH = 16;
+function stepWater(water, t, maxDepth){
+  maxDepth = (maxDepth == null) ? MAX_WATER_DEPTH : maxDepth;
+  const N4 = [[1,0],[-1,0],[0,1],[0,-1]];
+  const next = new Map();
+  const active = new Set();
+  for(const k of water.keys()){
+    active.add(k);
+    const c = k.split(','); const x = +c[0], z = +c[1];
+    for(const [dx,dz] of N4) active.add((x+dx) + ',' + (z+dz));
+  }
+  const delta = new Map();
+  const give = (k,v)=> delta.set(k, (delta.get(k)||0) + v);
+  for(const k of active){
+    if(!water.has(k)) continue;                   // 干涸列只作为接收方
+    const c = k.split(','); const x = +c[0], z = +c[1];
+    const S = water.get(k);
+    const lowers = [];
+    for(const [dx,dz] of N4){
+      const nk = (x+dx) + ',' + (z+dz);
+      const Sn = water.has(nk) ? water.get(nk) : t(+nk.split(',')[0], +nk.split(',')[1]);
+      if(Sn < S) lowers.push([nk, Sn]);            // 仅向更低处流
+    }
+    if(lowers.length === 0) continue;
+    let sum = S, cnt = lowers.length + 1;
+    for(const [,s] of lowers) sum += s;
+    const avg = Math.floor(sum / cnt);
+    const out = S - avg;                           // 本格应下降的体积
+    if(out <= 0) continue;
+    give(k, -out);
+    const per = Math.floor(out / lowers.length), rem = out - per*lowers.length;
+    for(let i=0;i<lowers.length;i++) give(lowers[i][0], per + (i < rem ? 1 : 0));
+  }
+  // 应用（体积守恒：所有 delta 之和为 0）
+  for(const k of active){
+    const c = k.split(','); const x = +c[0], z = +c[1]; const tn = t(x,z);
+    const base = water.has(k) ? water.get(k) : tn;
+    let s = base + (delta.get(k) || 0);
+    if(s <= tn) continue;                          // 无水/低于地形则清空
+    if(s > tn + maxDepth) s = tn + maxDepth;
+    next.set(k, s);
+  }
+  return next;
+}
 
 function heightAt(x, z){ return Math.floor(fbm(x*0.08 + 10, z*0.08 + 10) * amp) + 4; }
 function voxelColor(x, y, z){
@@ -161,9 +210,12 @@ function buildChunk(cx, cz, lod){
         if(c === null) continue;
         place(x, y, z, c);
       }
-      // 水位以下、地表以上的水柱（远处 LOD 省略，省开销）
-      if(!lod && h < WATER){
-        for(let y = h + 1; y <= WATER; y++){
+      // 低洼列初始化为海平面（仅注入一次），并用水体状态渲染流动后的水面
+      const wk = wkey(x, z);
+      if(!lod && h < WATER && !waterCol.has(wk)) waterCol.set(wk, WATER);
+      if(!lod && waterCol.has(wk)){
+        const top = waterCol.get(wk);
+        for(let y = h + 1; y <= top; y++){
           if(wi >= PER_CHUNK) break;
           dummy.position.set(x, y, z); dummy.updateMatrix();
           water.setMatrixAt(wi, dummy.matrix); wi++;
@@ -213,6 +265,31 @@ function rebuildChunk(cx, cz){
   scene.remove(c.mesh.solid); c.mesh.solid.dispose();
   scene.remove(c.mesh.water); c.mesh.water.dispose();
   chunks.set(k, { mesh: buildChunk(cx, cz, dist > 2) });
+}
+// 仅重建某区块的水网格（模拟步进后增量更新，避免重建整块实体）
+function rebuildWater(cx, cz){
+  const k = ckey(cx, cz); const c = chunks.get(k); if(!c) return;
+  const wmesh = c.mesh.water; let wi = 0;
+  for(let lx = 0; lx < CHUNK; lx++) for(let lz = 0; lz < CHUNK; lz++){
+    const x = cx*CHUNK + lx, z = cz*CHUNK + lz, wk = wkey(x, z);
+    if(waterCol.has(wk)){
+      const h = heightAt(x, z), top = waterCol.get(wk);
+      for(let y = h + 1; y <= top; y++){ if(wi >= PER_CHUNK) break; dummy.position.set(x, y, z); dummy.updateMatrix(); wmesh.setMatrixAt(wi, dummy.matrix); wi++; }
+    }
+  }
+  wmesh.count = wi; wmesh.instanceMatrix.needsUpdate = true;
+}
+// 模拟步进：对视野内水体跑一次 CA，更新状态并重绘受影响区块
+function simulateWater(){
+  if(waterCol.size === 0) return;
+  const cx0 = Math.floor(controls.target.x / CHUNK);
+  const cz0 = Math.floor(controls.target.z / CHUNK);
+  const next = stepWater(waterCol, (x,z)=> heightAt(x,z), MAX_WATER_DEPTH);
+  waterCol.clear(); for(const [k,v] of next) waterCol.set(k, v);
+  for(const [k] of chunks){
+    const [cx, cz] = k.split(',').map(Number);
+    if(Math.max(Math.abs(cx-cx0), Math.abs(cz-cz0)) <= VIEW) rebuildWater(cx, cz);
+  }
 }
 
 let totalCount = 0;
@@ -264,10 +341,68 @@ function editAt(clientX, clientY, remove){
   }
   rebuildChunk(Math.floor(x/CHUNK), Math.floor(z/CHUNK));
 }
+
+// ---------- 方块拾取与移动 ----------
+// 纯函数：根据命中面法线，返回方块应放置的目标整数坐标（面外侧一格）
+function destFromFace(x, y, z, nx, ny, nz){
+  return { x: x + Math.round(nx), y: y + Math.round(ny), z: z + Math.round(nz) };
+}
+// 纯函数：把 src 的方块(颜色 color)移动到 dst，更新 edits（旧位置置空、新位置着色）
+function commitMove(edits, src, dst, color, keyFn){
+  edits.set(keyFn(dst.x, dst.y, dst.z), color);
+  edits.set(keyFn(src.x, src.y, src.z), null);
+  return edits;
+}
+let selected = null;            // {x,y,z}
+let selectedColor = null;
+const selBox = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(1.04, 1.04, 1.04)),
+  new THREE.LineBasicMaterial({ color: 0xffee00 })
+);
+selBox.visible = false;
+scene.add(selBox);
+function pickCoord(clientX, clientY){
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
+  ndc.y = -((clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const meshes = [...chunks.values()].map(c => c.mesh.solid);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if(!hit) return null;
+  const m = hit.object, id = hit.instanceId;
+  m.getMatrixAt(id, dummy.matrix); dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
+  const x = Math.round(dummy.position.x), y = Math.round(dummy.position.y), z = Math.round(dummy.position.z);
+  const n = hit.face.normal;
+  return { x, y, z, nx: n.x, ny: n.y, nz: n.z };
+}
+function movePick(clientX, clientY){
+  const p = pickCoord(clientX, clientY);
+  if(!p) return;
+  if(!selected){
+    const c = voxelColor(p.x, p.y, p.z);
+    if(c === null) return;            // 空/水不可选
+    selected = { x: p.x, y: p.y, z: p.z };
+    selectedColor = c;
+    selBox.position.set(p.x, p.y, p.z);
+    selBox.visible = true;
+    flash('已选中方块，点击目标面放置');
+  } else {
+    const d = destFromFace(p.x, p.y, p.z, p.nx, p.ny, p.nz);
+    if(d.x === selected.x && d.y === selected.y && d.z === selected.z){
+      selected = null; selBox.visible = false; flash('已取消选择'); return;
+    }
+    commitMove(edits, selected, d, selectedColor, key);
+    rebuildChunk(Math.floor(d.x/CHUNK), Math.floor(d.z/CHUNK));
+    rebuildChunk(Math.floor(selected.x/CHUNK), Math.floor(selected.z/CHUNK));
+    selected = null; selBox.visible = false;
+    flash('已移动到 ('+d.x+','+d.y+','+d.z+')');
+  }
+}
 renderer.domElement.addEventListener('pointerdown', e=>{
   if(e.button === 2) { editAt(e.clientX, e.clientY, true); return; }
   if(mode === 'add') editAt(e.clientX, e.clientY, false);
-  else editAt(e.clientX, e.clientY, true);
+  else if(mode === 'del') editAt(e.clientX, e.clientY, true);
+  else if(mode === 'move') movePick(e.clientX, e.clientY);
 });
 renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
 
@@ -304,8 +439,9 @@ const DAY_SPEED = 0.06;
 
 // ---------- 控件 ----------
 const $ = id => document.getElementById(id);
-$('addBtn').onclick = ()=>{ mode='add'; $('addBtn').classList.add('on'); $('delBtn').classList.remove('on'); $('mode').textContent='模式: 添加'; };
-$('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('mode').textContent='模式: 删除'; };
+$('addBtn').onclick = ()=>{ mode='add'; $('addBtn').classList.add('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 添加'; };
+$('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 删除'; };
+$('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
 $('brush').onchange = e=> brush = e.target.value;
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
@@ -406,5 +542,6 @@ function tick(){
 }
 resize();
 ensureChunks();
+setInterval(simulateWater, 700);     // 水体流动模拟（每 0.7s 步进一次）
 document.getElementById('mode').textContent='模式: 添加';
 tick();
