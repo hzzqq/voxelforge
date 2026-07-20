@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>VoxelForge · 体素世界引擎</title>
+<style>
+  :root{ --bg:#0a0c10; --panel:#12161d; --line:#1f2730; --txt:#cdd6e0; --accent:#7ee787; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--txt);
+    font-family:ui-monospace,Menlo,Consolas,monospace;overflow:hidden;}
+  #app{display:flex;height:100%;}
+  canvas{display:block;}
+  #stage{flex:1;position:relative;}
+  #hud{position:absolute;left:14px;top:12px;font-size:12px;line-height:1.6;
+    background:rgba(10,12,16,.55);padding:8px 12px;border:1px solid var(--line);
+    border-radius:8px;pointer-events:none;}
+  #hud b{color:var(--accent);}
+  #panel{width:260px;background:var(--panel);border-left:1px solid var(--line);
+    padding:18px 16px;overflow-y:auto;}
+  #panel h1{font-size:15px;margin:0 0 2px;}
+  #panel .sub{font-size:11px;color:#6b7888;margin-bottom:16px;}
+  .row{margin:14px 0;}
+  .row label{display:block;font-size:12px;color:#9fb0c0;margin-bottom:6px;}
+  button{width:100%;background:#1a222c;color:var(--txt);border:1px solid var(--line);
+    border-radius:6px;padding:9px;font:inherit;cursor:pointer;transition:.15s;margin-bottom:8px;}
+  button:hover{border-color:var(--accent);color:var(--accent);}
+  button.on{background:var(--accent);color:#06200c;border-color:var(--accent);font-weight:700;}
+  select{width:100%;background:#0c0f14;color:var(--txt);border:1px solid var(--line);
+    border-radius:6px;padding:7px 8px;font:inherit;}
+  .hint{font-size:11px;color:#6b7888;line-height:1.6;margin-top:18px;
+    border-top:1px solid var(--line);padding-top:12px;}
+  input[type=range]{width:100%;}
+  .val{float:right;color:var(--accent);}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <div id="hud">方块数 <b id="count">0</b> · 拖拽转视角 / 滚轮缩放<br><b id="mode">模式: 添加</b> · 点击编辑 · <b>WASD</b> 漫游无限世界</div>
+  </div>
+  <div id="panel">
+    <h1>VoxelForge</h1>
+    <div class="sub">Three.js 体素世界引擎</div>
+    <div class="row">
+      <button id="addBtn" class="on">✛ 添加方块 (左键)</button>
+      <button id="delBtn">✕ 删除方块 (右键)</button>
+    </div>
+    <div class="row">
+      <button id="walkBtn">🚶 行走模式 (重力)</button>
+    </div>
+    <div class="row">
+      <button id="dayBtn">🌗 昼夜循环</button>
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="caves" checked /> 生成洞穴（3D 噪声雕刻）
+      </label>
+    </div>
+    <div class="row">
+      <label>笔刷颜色</label>
+      <select id="brush">
+        <option value="grass">草绿</option>
+        <option value="dirt">泥土棕</option>
+        <option value="stone">岩石灰</option>
+        <option value="sand">沙黄</option>
+        <option value="water">水蓝</option>
+        <option value="lava">熔岩红</option>
+        <option value="wood">木色</option>
+        <option value="leaf">叶绿</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>地形起伏 <span class="val" id="ampVal">12</span></label>
+      <input type="range" id="amp" min="4" max="24" value="12" />
+    </div>
+    <div class="row">
+      <label>世界范围 <span class="val" id="sizeVal">40</span></label>
+      <input type="range" id="size" min="20" max="64" value="40" />
+    </div>
+    <div class="row"><button id="regen">重新生成世界</button></div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <button id="saveW">💾 保存世界</button>
+      <button id="loadW">📂 读取世界</button>
+    </div>
+    <div class="hint">
+      价值噪声(value-noise) FBM 地形生成 · 按区块<b>流式加载</b>（仅渲染视野内区块，
+      远离即回收）· 每区块 InstancedMesh 单 draw call · 射线拾取编辑。<br>
+      <b>生物群系</b>：雪顶(高) / 草坡 / 水岸沙地，低于<b>水位</b>处生成半透明蓝色水体。<br>
+      <b>程序化树木</b>：草坡上按噪声低概率生成树干 + 叶冠。<br>
+      <b>WASD</b> 在地面漫游，区块随相机无限生成。右键删除需先切到删除模式。
+      <b>🚶 行走模式</b>：开启后受重力下落并停在地形表面，第一人称 WASD 行走，<b>空格跳跃</b>，遇到方块会被挡住（不能穿墙）。
+      <b>🌗 昼夜循环</b>：太阳绕天运动，天空颜色与光照强度随时段变化。
+    </div>
+  </div>
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

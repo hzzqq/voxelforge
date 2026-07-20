@@ -1,0 +1,13 @@
+{
+  "name": "voxelforge",
+  "version": "1.0.0",
+  "description": "VoxelForge — Three.js 程序化无限体素世界",
+  "main": "index.html",
+  "scripts": {
+    "serve": "python -m http.server 8080",
+    "start": "python -m http.server 8080"
+  },
+  "keywords": ["three.js", "voxel", "procedural", "webgl", "noise", "minecraft"],
+  "author": "hzzqq",
+  "license": "MIT"
+}
