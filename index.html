@@ -64,12 +64,23 @@
       </label>
     </div>
     <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="fall" checked /> 掉落物理（沙/砾石重力）
+      </label>
+    </div>
+    <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="lava" checked /> 岩浆模拟（黏滞流动 + 冷却成石 + 点燃）
+      </label>
+    </div>
+    <div class="row">
       <label>笔刷颜色</label>
       <select id="brush">
         <option value="grass">草绿</option>
         <option value="dirt">泥土棕</option>
         <option value="stone">岩石灰</option>
         <option value="sand">沙黄</option>
+        <option value="gravel">砾石灰</option>
         <option value="water">水蓝</option>
         <option value="lava">熔岩红</option>
         <option value="wood">木色</option>
@@ -89,6 +100,11 @@
       <button id="saveW">💾 保存世界</button>
       <button id="loadW">📂 读取世界</button>
     </div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <button id="exportW">⬇ 导出 JSON</button>
+      <button id="importW">⬆ 导入 JSON</button>
+    </div>
+    <input type="file" id="worldFile" accept="application/json,.json" style="display:none" />
     <div class="hint">
       价值噪声(value-noise) FBM 地形生成 · 按区块<b>流式加载</b>（仅渲染视野内区块，
       远离即回收）· 每区块 InstancedMesh 单 draw call · 射线拾取编辑。<br>
@@ -98,6 +114,8 @@
       <b>✋ 拾取并移动方块</b>：点击选中一块（高亮黄框），再点击目标面即把该块移动到新位置（原位置挖空），再次点原块取消。
       <b>🚶 行走模式</b>：开启后受重力下落并停在地形表面，第一人称 WASD 行走，<b>空格跳跃</b>，遇到方块会被挡住（不能穿墙）。
       <b>🌗 昼夜循环</b>：太阳绕天运动，天空颜色与光照强度随时段变化。
+      <b>⚠ 掉落物理</b>：用<b>沙黄/砾石灰</b>笔刷放置的方块若悬空会受重力下落，直到落在实心方块上；可用「掉落物理」开关关闭。
+      <b>🌋 岩浆</b>：选<b>熔岩红</b>笔刷放置即生成流体岩浆——黏滞流动（仅往落差≥2 处铺开）、遇水冷却成石头、接触树木/树叶将其点燃为焦黑；可用「岩浆模拟」开关关闭。
     </div>
   </div>
 </div>
