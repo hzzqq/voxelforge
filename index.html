@@ -98,6 +98,21 @@
       </select>
     </div>
     <div class="row">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="mirrorOn" /> 镜像笔刷（对称落笔）
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px;">
+        <select id="mirrorAxis">
+          <option value="x" selected>轴 X</option>
+          <option value="y">轴 Y</option>
+          <option value="z">轴 Z</option>
+        </select>
+        <span style="display:flex;align-items:center;gap:4px;">
+          镜面<input type="number" id="mirrorCenter" value="0" step="1" style="width:48px;" />
+        </span>
+      </div>
+    </div>
+    <div class="row">
       <label>爆破半径 <span class="val" id="boomRVal">3</span></label>
       <select id="boomR">
         <option value="2">2</option>
@@ -169,6 +184,12 @@
       <button id="exportW">⬇ 导出 JSON</button>
       <button id="importW">⬆ 导入 JSON</button>
     </div>
+    <div class="row"><button id="statsBtn">📊 方块统计</button></div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <button id="undoBtn">↩ 撤销</button>
+      <button id="redoBtn">↪ 重做</button>
+    </div>
+    <div id="statsOut" style="font-size:12px;line-height:1.6;margin-top:4px;color:#cfd8e3;"></div>
     <input type="file" id="worldFile" accept="application/json,.json" style="display:none" />
     <div class="hint">
       价值噪声(value-noise) FBM 地形生成 · 按区块<b>流式加载</b>（仅渲染视野内区块，

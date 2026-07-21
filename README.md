@@ -27,6 +27,9 @@
 - **矿脉富集（enrichOre）**：纯函数 `enrichOre(edits,oreType,key,PALETTE)` 扫描矿物细胞 6 邻域、把石头就地富集为矿物（返回新 Map），UI 矿种下拉 +「富集」按钮，重建区块。
 - **球形挖掘（爆破）boom/explode**：纯函数 `explode(edits,cx,cy,cz,radius)` 用欧氏半径删除范围内方块（返回新 Map、不改原 Map），新增 boom 模式 + 爆破半径滑块（2~6），仅重建受影响区块。
 - **洪泛填充（油漆桶）floodFill**：纯函数 `floodFill(edits,sx,sy,sz,newType,key,PALETTE)` 6 连通 BFS 把与种子同色的相连方块替换为当前笔刷类型（返回新 Map、不改原 Map），新增 fill 模式 + 🪣 填充按钮，跨区块重建。
+- **方块统计（blockStats）**：纯函数 `blockStats(edits,PALETTE,waterCol,lavaCol)` 统计各类型方块数量、实心总数、挖空数，UI 顶部实时显示。
+- **撤销 / 重做（undo / redo）**：`snapshotEdits` + `undoStack`/`redoStack`（上限 64），每次落笔 / 批量操作前快照、操作后入栈；Ctrl+Z 撤销、Ctrl+Y / Ctrl+Shift+Z 重做，跨端一致。
+- **对称镜像笔刷（mirrorEdits）**：纯函数 `mirrorEdits(edits,axis,center,key)` 沿 X/Y/Z 轴以 `center` 为镜面反射每次落笔（原块 + 镜像块），UI 镜像开关 + 轴选择 + 镜面坐标输入，跨区块时整世界重建。
 
 ## 🧱 技术栈
 
@@ -83,7 +86,10 @@ npm test
 # _ore_test.js     (16/16) 矿脉富集：6 邻域扫描 / 石头→矿物 / 返回新 Map / 不重复富集
 # _explode_test.js (14/14) 球形挖掘：中心/近邻/球界/球外保留/原Map不变/体积守恒
 # _fill_test.js    (15/15) 洪泛填充：连通替换/边界/空种子/6 连通/不改原图/体积守恒
-# 合计 10 套、127 项全通过
+# _blockstat_test.js (17/17) 方块统计：各类型计数/实心总数/挖空数/不改入参
+# _undo_test.js    (31/31) 撤销重做：快照/往返/容量上限/多步/不改原快照
+# _mirror_test.js  (21/21) 对称镜像：X/Y/Z 反射/镜面自身不重复/不改入参/接线
+# 合计 13 套、196 项全通过
 ```
 
 ## 📄 许可

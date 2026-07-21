@@ -110,6 +110,21 @@ let falling = new Set();   // "x,y,z" -> 参与重力掉落的方块（仅用户
 let chunks = new Map();    // "cx,cz" -> { mesh }
 let waterCol = new Map();  // "x,z" -> 水面y(整数)：列状水状态（修复：此前漏声明，浏览器会崩溃）
 let lavaCol = new Map();   // "x,z" -> 岩浆面y(整数)：列状岩浆状态
+
+// ---------- 撤销/重做（快照式，作用于 edits 体素编辑） ----------
+let undoStack = [], redoStack = [];
+const UNDO_CAP = 64;
+function snapshotEdits(){ return new Map(edits); }
+function rebuildAll(){ for(const k of chunks.keys()){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } }
+function editsEqual(a, b){
+  if(a.size !== b.size) return false;
+  for(const [k,v] of a){ if(b.get(k) !== v) return false; }
+  return true;
+}
+// 编辑前 snapshot，编辑后调用：若有变化则压入撤销栈、清空重做栈（并限长）
+function recordUndo(prev){ if(prev && !editsEqual(prev, edits)){ undoStack.push(prev); if(undoStack.length > UNDO_CAP) undoStack.shift(); redoStack.length = 0; } }
+function undoEdit(){ if(undoStack.length === 0) return false; redoStack.push(new Map(edits)); edits = undoStack.pop(); rebuildAll(); return true; }
+function redoEdit(){ if(redoStack.length === 0) return false; undoStack.push(new Map(edits)); edits = redoStack.pop(); rebuildAll(); return true; }
 let lavaOn = true;         // 岩浆模拟总开关
 const key = (x,y,z) => x + ',' + y + ',' + z;
 const ckey = (cx,cz) => cx+','+cz;
@@ -506,6 +521,7 @@ function ensureChunks(){
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
 let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3;
+let mirrorOn = false, mirrorAxis = 'x', mirrorCenter = 0;   // 镜像笔刷：沿某轴以 center 为镜面反射每次落笔
 // ---------- 笔刷：纯函数（编辑与测试复用）----------
 // 放置笔刷：从命中点外侧一格 (nx,ny,nz) 起，按 size³ 立方体填充。
 // 流体(水/岩浆)按列记录表面高度(顶部空格 = ny+size)；实心方块写入 edits，沙/砾石加入掉落集。
@@ -591,6 +607,41 @@ function floodFill(edits, sx, sy, sz, newType, key, PALETTE){
   return next;
 }
 
+// 纯函数：镜像笔刷——把 edits 沿 axis 轴、以 center 为镜面(坐标值)做三维镜像，返回新 Map(含原块+镜像块)。
+// 镜像坐标 = 2*center - 原坐标；落在镜面上的方块(mirror key === 原 key)跳过避免重复；不修改入参。
+function mirrorEdits(edits, axis, center, key){
+  const next = new Map(edits);
+  for(const [k, v] of edits){
+    const [x,y,z] = k.split(',').map(Number);
+    let mx = x, my = y, mz = z;
+    if(axis === 'x') mx = 2*center - x;
+    else if(axis === 'y') my = 2*center - y;
+    else /* z */ mz = 2*center - z;
+    const mk = key(mx, my, mz);
+    if(mk === k) continue;            // 镜面自身不重复
+    next.set(mk, v);
+  }
+  return next;
+}
+
+// 纯函数：统计 edits 中各类型方块数量（颜色反查 PALETTE）。可选 waterCol/lavaCol 计入流体列数。
+// 返回 { counts:{类型:数量}, total:实心方块总数, removed:edits 中 null(挖空)数 }；不修改入参。
+function blockStats(edits, PALETTE, waterCol, lavaCol){
+  const colorToType = {};
+  for(const t in PALETTE) colorToType[PALETTE[t]] = t;
+  const counts = {};
+  for(const t in PALETTE) counts[t] = 0;
+  let total = 0, removed = 0;
+  for(const [, v] of edits){
+    if(v == null){ removed++; continue; }
+    const t = colorToType[v];
+    if(t !== undefined){ counts[t]++; total++; }
+  }
+  if(waterCol) counts.water = waterCol.size;
+  if(lavaCol) counts.lava = lavaCol.size;
+  return { counts, total, removed };
+}
+
 function editAt(clientX, clientY, remove){
   const r = renderer.domElement.getBoundingClientRect();
   ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
@@ -608,7 +659,12 @@ function editAt(clientX, clientY, remove){
   const nx = x + Math.round(n.x), ny = y + Math.round(n.y), nz = z + Math.round(n.z);
   if(remove){ eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey); }
   else { applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE); }
-  rebuildChunk(Math.floor(x/CHUNK), Math.floor(z/CHUNK));
+  if(mirrorOn){
+    edits = mirrorEdits(edits, mirrorAxis, mirrorCenter, key);
+    rebuildAll();                 // 镜像可能落在其他区块，整世界重建以确保可见
+  } else {
+    rebuildChunk(Math.floor(x/CHUNK), Math.floor(z/CHUNK));
+  }
 }
 // 球形挖掘：在命中方块处引爆半径 boomR 的球形空腔，删除范围内方块并重建受影响区块
 function boomAt(clientX, clientY){
@@ -712,12 +768,14 @@ function movePick(clientX, clientY){
   }
 }
 renderer.domElement.addEventListener('pointerdown', e=>{
-  if(e.button === 2) { editAt(e.clientX, e.clientY, true); return; }
-  if(mode === 'add') editAt(e.clientX, e.clientY, false);
+  const prev = snapshotEdits();   // 编辑前快照，供撤销
+  if(e.button === 2) { editAt(e.clientX, e.clientY, true); }
+  else if(mode === 'add') editAt(e.clientX, e.clientY, false);
   else if(mode === 'del') editAt(e.clientX, e.clientY, true);
   else if(mode === 'move') movePick(e.clientX, e.clientY);
   else if(mode === 'boom') boomAt(e.clientX, e.clientY);
   else if(mode === 'fill') fillAt(e.clientX, e.clientY);
+  recordUndo(prev);
 });
 renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
 
@@ -761,21 +819,36 @@ $('boomBtn').onclick = ()=>{ mode='boom'; $('boomBtn').classList.add('on'); $('a
 $('fillBtn').onclick = ()=>{ mode='fill'; $('fillBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('mode').textContent='模式: 填充(洪泛相连同色区域)'; };
 $('brush').onchange = e=> brush = e.target.value;
 $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
+$('mirrorOn').onchange = e=>{ mirrorOn = e.target.checked; flash(mirrorOn ? '镜像笔刷：开' : '镜像笔刷：关'); };
+$('mirrorAxis').onchange = e=>{ mirrorAxis = e.target.value; };
+$('mirrorCenter').oninput = e=>{ mirrorCenter = +e.target.value || 0; };
 $('boomR').onchange = e=>{ boomR = +e.target.value; $('boomRVal').textContent = boomR; };
 // 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色
 $('replaceBtn').onclick = ()=>{
   const from = $('fromType').value, to = $('toType').value;
   if(from === to) return;   // 同类型无需操作
+  const prev = snapshotEdits();
   edits = replaceType(edits, from, to, PALETTE);
+  recordUndo(prev);
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
 };
 // 矿脉富集：把与矿物正交相邻的石头变为矿物，重建所有已加载区块
 $('enrichBtn').onclick = ()=>{
   const ore = $('enrichType').value;
   if(ore === 'stone') return;   // 选石无意义
+  const prev = snapshotEdits();
   edits = enrichOre(edits, ore, key, PALETTE);
+  recordUndo(prev);
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
 };
+// 撤销/重做：按钮 + 快捷键 Ctrl/Cmd+Z（撤销）、Ctrl/Cmd+Y 或 Ctrl/Cmd+Shift+Z（重做）
+$('undoBtn').onclick = ()=>{ if(undoEdit()) flash('已撤销'); else flash('无可撤销'); };
+$('redoBtn').onclick = ()=>{ if(redoEdit()) flash('已重做'); else flash('无可重做'); };
+window.addEventListener('keydown', e=>{
+  const k = e.key.toLowerCase();
+  if((e.ctrlKey || e.metaKey) && k === 'z' && !e.shiftKey){ e.preventDefault(); if(undoEdit()) flash('已撤销'); else flash('无可撤销'); }
+  else if((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))){ e.preventDefault(); if(redoEdit()) flash('已重做'); else flash('无可重做'); }
+});
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('regen').onclick = ()=>{ edits.clear(); falling.clear(); lavaCol.clear(); for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
@@ -834,6 +907,19 @@ $('exportW').onclick = ()=>{
   flash('已导出 voxel-world.json ✓');
 };
 $('importW').onclick = ()=> $('worldFile').click();
+function updateStats(){
+  const out = document.getElementById('statsOut'); if(!out) return;
+  const s = blockStats(edits, PALETTE, waterCol, lavaCol);
+  const order = ['grass','dirt','stone','sand','gravel','wood','leaf','snow','iron','gold','diamond','coal','water','lava'];
+  let html = '实心 <b>' + s.total + '</b> · 挖空 ' + s.removed + '<br>';
+  for(const t of order){
+    const n = s.counts[t] || 0;
+    if(n > 0){ const hex = (PALETTE[t]||0).toString(16).padStart(6,'0'); html += '<span style="color:#'+hex+'">■</span> '+t+': '+n+'　'; }
+  }
+  out.innerHTML = html;
+}
+if($('statsBtn')) $('statsBtn').onclick = updateStats;
+setInterval(updateStats, 1000);
 $('worldFile').onchange = e=>{
   const f = e.target.files && e.target.files[0]; if(!f) return;
   const r = new FileReader();
