@@ -505,7 +505,36 @@ function ensureChunks(){
 // ---------- 编辑 ----------
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-let mode = 'add', brush = 'grass';
+let mode = 'add', brush = 'grass', brushSize = 1;
+// ---------- 笔刷：纯函数（编辑与测试复用）----------
+// 放置笔刷：从命中点外侧一格 (nx,ny,nz) 起，按 size³ 立方体填充。
+// 流体(水/岩浆)按列记录表面高度(顶部空格 = ny+size)；实心方块写入 edits，沙/砾石加入掉落集。
+// 关键修复：water 笔刷此前误走 else 分支写成“实心蓝块”，现独立成流体列。
+function applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, size, FALL, key, wkey, PALETTE){
+  size = size || 1;
+  const top = ny + size;
+  for(let di=0; di<size; di++) for(let dj=0; dj<size; dj++) for(let dk=0; dk<size; dk++){
+    const x = nx+di, y = ny+dj, z = nz+dk;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
+    if(brush === 'water'){ waterCol.set(wk, top); continue; }
+    edits.set(k, PALETTE[brush]);
+    if(FALL.has(brush)) falling.add(k);
+  }
+}
+// 擦除笔刷：仅当被擦格恰好是某流体列的表面时才清除该列，避免误删无关流体
+function eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, size, key, wkey){
+  size = size || 1;
+  for(let di=0; di<size; di++) for(let dj=0; dj<size; dj++) for(let dk=0; dk<size; dk++){
+    const x = nx+di, y = ny+dj, z = nz+dk;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
+    if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
+    edits.set(k, null);
+    falling.delete(k);
+  }
+}
+
 function editAt(clientX, clientY, remove){
   const r = renderer.domElement.getBoundingClientRect();
   ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
@@ -520,17 +549,9 @@ function editAt(clientX, clientY, remove){
   m.getMatrixAt(id, dummy.matrix); dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
   const x = Math.round(dummy.position.x), y = Math.round(dummy.position.y), z = Math.round(dummy.position.z);
   const n = hit.face.normal;
-  if(remove){ edits.set(key(x,y,z), null); falling.delete(key(x,y,z)); lavaCol.delete(wkey(x,z)); }
-  else {
-    const nx = x + Math.round(n.x), ny = y + Math.round(n.y), nz = z + Math.round(n.z);
-    const nk = key(nx,ny,nz);
-    if(brush === 'lava'){
-      lavaCol.set(wkey(nx,nz), ny + 1);    // 岩浆为流体：按列记录表面，单独渲染 + 模拟
-    } else {
-      edits.set(nk, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(nk);   // 沙/砾石放置后参与重力
-    }
-  }
+  const nx = x + Math.round(n.x), ny = y + Math.round(n.y), nz = z + Math.round(n.z);
+  if(remove){ eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey); }
+  else { applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE); }
   rebuildChunk(Math.floor(x/CHUNK), Math.floor(z/CHUNK));
 }
 
@@ -637,6 +658,7 @@ $('addBtn').onclick = ()=>{ mode='add'; $('addBtn').classList.add('on'); $('delB
 $('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 删除'; };
 $('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
 $('brush').onchange = e=> brush = e.target.value;
+$('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('regen').onclick = ()=>{ edits.clear(); falling.clear(); lavaCol.clear(); for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };

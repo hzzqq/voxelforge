@@ -6,7 +6,7 @@
   "scripts": {
     "serve": "node serve.js",
     "start": "node serve.js",
-    "test": "cp main.js _syntax_check.mjs && node --check _syntax_check.mjs && rm _syntax_check.mjs && node _water_test.js && node _move_test.js && node _fall_test.js && node _lava_test.js && node _worldio_test.js"
+    "test": "cp main.js _syntax_check.mjs && node --check _syntax_check.mjs && rm _syntax_check.mjs && node _water_test.js && node _move_test.js && node _fall_test.js && node _lava_test.js && node _worldio_test.js && node _brush_test.js"
   },
   "keywords": ["three.js", "voxel", "procedural", "webgl", "noise", "minecraft"],
   "author": "hzzqq",
