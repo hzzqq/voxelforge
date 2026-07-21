@@ -96,6 +96,51 @@
       </select>
     </div>
     <div class="row">
+      <label>批量换方块</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;align-items:center;">
+        <select id="fromType">
+          <option value="grass">草绿</option>
+          <option value="dirt">泥土棕</option>
+          <option value="stone">岩石灰</option>
+          <option value="sand">沙黄</option>
+          <option value="gravel">砾石灰</option>
+          <option value="wood">木色</option>
+          <option value="leaf">叶绿</option>
+          <option value="iron">铁灰</option>
+          <option value="gold">金</option>
+          <option value="diamond">钻石</option>
+          <option value="coal">煤炭</option>
+        </select>
+        <select id="toType">
+          <option value="stone">岩石灰</option>
+          <option value="grass">草绿</option>
+          <option value="dirt">泥土棕</option>
+          <option value="sand">沙黄</option>
+          <option value="gravel">砾石灰</option>
+          <option value="wood">木色</option>
+          <option value="leaf">叶绿</option>
+          <option value="iron">铁灰</option>
+          <option value="gold">金</option>
+          <option value="diamond">钻石</option>
+          <option value="coal">煤炭</option>
+        </select>
+      </div>
+      <button id="replaceBtn" style="margin-top:6px;">🔁 全部替换</button>
+    </div>
+    <div class="row">
+      <label>矿脉富集（石头邻矿→矿）</label>
+      <div style="display:grid;grid-template-columns:1fr auto;gap:6px;align-items:center;">
+        <select id="enrichType">
+          <option value="iron">铁</option>
+          <option value="gold">金</option>
+          <option value="diamond">钻石</option>
+          <option value="coal">煤炭</option>
+          <option value="stone">石(无变化)</option>
+        </select>
+        <button id="enrichBtn">⛏ 富集</button>
+      </div>
+    </div>
+    <div class="row">
       <label>地形起伏 <span class="val" id="ampVal">12</span></label>
       <input type="range" id="amp" min="4" max="24" value="12" />
     </div>

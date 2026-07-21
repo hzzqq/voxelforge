@@ -534,6 +534,32 @@ function eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, size, key, wk
     falling.delete(k);
   }
 }
+// 纯函数：批量换方块——遍历 edits，把所有 PALETTE[fromType] 方块替换为 PALETTE[toType]，返回新 Map。
+// 不参与掉落集/流体列处理（仅换色），故只映射 edits 一项；空值(null) 与 非 from 颜色原样保留。
+function replaceType(edits, fromType, toType, PALETTE){
+  const from = PALETTE[fromType], to = PALETTE[toType];
+  const next = new Map();
+  for(const [k, v] of edits){
+    next.set(k, (v === from) ? to : v);
+  }
+  return next;
+}
+// 纯函数：矿脉富集——把正交相邻于 oreType 矿物的石头块就地变为矿物，返回新 Map。
+// 仅扫描 edits 中矿物细胞的 6 邻域，命中石头则富集；空值/非石头/非邻域保持不变。
+function enrichOre(edits, oreType, key, PALETTE){
+  const ore = PALETTE[oreType], stone = PALETTE.stone;
+  const next = new Map(edits);   // 浅复制，避免原地修改
+  const N = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  for(const [k, v] of edits){
+    if(v !== ore) continue;
+    const [x,y,z] = k.split(',').map(Number);
+    for(const d of N){
+      const nk = key(x + d[0], y + d[1], z + d[2]);
+      if(next.get(nk) === stone) next.set(nk, ore);
+    }
+  }
+  return next;
+}
 
 function editAt(clientX, clientY, remove){
   const r = renderer.domElement.getBoundingClientRect();
@@ -659,6 +685,20 @@ $('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addB
 $('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
 $('brush').onchange = e=> brush = e.target.value;
 $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
+// 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色
+$('replaceBtn').onclick = ()=>{
+  const from = $('fromType').value, to = $('toType').value;
+  if(from === to) return;   // 同类型无需操作
+  edits = replaceType(edits, from, to, PALETTE);
+  for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
+};
+// 矿脉富集：把与矿物正交相邻的石头变为矿物，重建所有已加载区块
+$('enrichBtn').onclick = ()=>{
+  const ore = $('enrichType').value;
+  if(ore === 'stone') return;   // 选石无意义
+  edits = enrichOre(edits, ore, key, PALETTE);
+  for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
+};
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('regen').onclick = ()=>{ edits.clear(); falling.clear(); lavaCol.clear(); for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };

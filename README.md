@@ -23,6 +23,8 @@
 - **昼夜循环**：太阳绕天运动 + 天空 ShaderMaterial 球壳着色过渡 + 平行光/半球光随时段变化。
 - **世界保存 / 加载 + 文件导入导出**：localStorage 持久化振幅/洞穴开关/编辑记录 **并补齐水/岩浆 Map**，可还原；另支持导出 / 导入 JSON 世界文件。
 - **远处区块 LOD**：距离 > 2 的区块跳过树木/水生成，降低开销 → **效率提升**。
+- **批量换方块（replaceType）**：纯函数 `replaceType(edits,fromType,toType,PALETTE)` 遍历编辑表把某类方块整体替换为另一类（返回新 Map、不改原 Map），UI 两个下拉（从 / 到）+「全部替换」一键重生成所有区块。
+- **矿脉富集（enrichOre）**：纯函数 `enrichOre(edits,oreType,key,PALETTE)` 扫描矿物细胞 6 邻域、把石头就地富集为矿物（返回新 Map），UI 矿种下拉 +「富集」按钮，重建区块。
 
 ## 🧱 技术栈
 
@@ -58,6 +60,7 @@ main.js (ESM)
  ├─ moveStep / solidAt —— 行走 + 逐轴碰撞 + 跳跃
  ├─ pickCoord / movePick —— 射线拾取选中 + 搬移（destFromFace/commitMove 纯函数）
  ├─ stepWater / simulateWater —— 水体 CA 流动（体积守恒）
+ ├─ replaceType / enrichOre —— 纯函数批量换方块 / 矿脉富集（返回新 Map）
  └─ localStorage 存档 —— amp/cavesOn/edits 读写
 ```
 
@@ -74,7 +77,9 @@ npm test
 # _lava_test.js    (12/12) 岩浆：黏滞流动 / 冷却成石 / 点燃相邻
 # _worldio_test.js (14/14) 世界存读档：水/岩浆 Map 全量往返 / 部分字段健壮
 # _brush_test.js   (16/16) 笔刷尺寸 + 流体笔刷修正：草/沙/岩浆/水体行为 / size=2 覆盖 / 擦除清列
-# 合计 6 套、70 项全通过
+# _replace_test.js (12/12) 批量换方块：from→to 全部替换 / 返回新 Map / 不改原 Map / 体积守恒
+# _ore_test.js     (16/16) 矿脉富集：6 邻域扫描 / 石头→矿物 / 返回新 Map / 不重复富集
+# 合计 8 套、98 项全通过
 ```
 
 ## 📄 许可
