@@ -25,6 +25,8 @@
 - **远处区块 LOD**：距离 > 2 的区块跳过树木/水生成，降低开销 → **效率提升**。
 - **批量换方块（replaceType）**：纯函数 `replaceType(edits,fromType,toType,PALETTE)` 遍历编辑表把某类方块整体替换为另一类（返回新 Map、不改原 Map），UI 两个下拉（从 / 到）+「全部替换」一键重生成所有区块。
 - **矿脉富集（enrichOre）**：纯函数 `enrichOre(edits,oreType,key,PALETTE)` 扫描矿物细胞 6 邻域、把石头就地富集为矿物（返回新 Map），UI 矿种下拉 +「富集」按钮，重建区块。
+- **球形挖掘（爆破）boom/explode**：纯函数 `explode(edits,cx,cy,cz,radius)` 用欧氏半径删除范围内方块（返回新 Map、不改原 Map），新增 boom 模式 + 爆破半径滑块（2~6），仅重建受影响区块。
+- **洪泛填充（油漆桶）floodFill**：纯函数 `floodFill(edits,sx,sy,sz,newType,key,PALETTE)` 6 连通 BFS 把与种子同色的相连方块替换为当前笔刷类型（返回新 Map、不改原 Map），新增 fill 模式 + 🪣 填充按钮，跨区块重建。
 
 ## 🧱 技术栈
 
@@ -79,7 +81,9 @@ npm test
 # _brush_test.js   (16/16) 笔刷尺寸 + 流体笔刷修正：草/沙/岩浆/水体行为 / size=2 覆盖 / 擦除清列
 # _replace_test.js (12/12) 批量换方块：from→to 全部替换 / 返回新 Map / 不改原 Map / 体积守恒
 # _ore_test.js     (16/16) 矿脉富集：6 邻域扫描 / 石头→矿物 / 返回新 Map / 不重复富集
-# 合计 8 套、98 项全通过
+# _explode_test.js (14/14) 球形挖掘：中心/近邻/球界/球外保留/原Map不变/体积守恒
+# _fill_test.js    (15/15) 洪泛填充：连通替换/边界/空种子/6 连通/不改原图/体积守恒
+# 合计 10 套、127 项全通过
 ```
 
 ## 📄 许可

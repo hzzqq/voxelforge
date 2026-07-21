@@ -505,7 +505,7 @@ function ensureChunks(){
 // ---------- 编辑 ----------
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-let mode = 'add', brush = 'grass', brushSize = 1;
+let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3;
 // ---------- 笔刷：纯函数（编辑与测试复用）----------
 // 放置笔刷：从命中点外侧一格 (nx,ny,nz) 起，按 size³ 立方体填充。
 // 流体(水/岩浆)按列记录表面高度(顶部空格 = ny+size)；实心方块写入 edits，沙/砾石加入掉落集。
@@ -560,6 +560,36 @@ function enrichOre(edits, oreType, key, PALETTE){
   }
   return next;
 }
+// 纯函数：球形挖掘(爆破)——删除中心 (cx,cy,cz) 欧氏半径 radius 内的所有方块，返回新 Map（不改原 Map）。
+// 半径边界用 <= r² 判定（含球面），体积守恒于“被移除”语义；空值/球外方块原样保留。
+function explode(edits, cx, cy, cz, radius){
+  const r2 = radius * radius;
+  const next = new Map(edits);
+  for(const [k] of edits){
+    const [x,y,z] = k.split(',').map(Number);
+    const dx = x-cx, dy = y-cy, dz = z-cz;
+    if(dx*dx + dy*dy + dz*dz <= r2) next.set(k, null);
+  }
+  return next;
+}
+// 纯函数：三维洪泛填充(flood fill)——从 (sx,sy,sz) 出发，将 6 连通、颜色与种子相同的所有方块替换为 newType，返回新 Map(不改原)。
+// 仅填充“同色实心方块”连通域，空(空气/流体列)种子不操作；目标同色直接返回原图(无副作用)。
+function floodFill(edits, sx, sy, sz, newType, key, PALETTE){
+  const seed = edits.get(key(sx, sy, sz));
+  if(seed == null) return edits;                 // 种子为空(空气/水)不填充
+  const reach = PALETTE[newType];
+  if(reach === seed) return edits;               // 目标同色无需操作
+  const next = new Map(edits);
+  const N = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  const stack = [[sx, sy, sz]];
+  while(stack.length){
+    const [x, y, z] = stack.pop();
+    if(next.get(key(x, y, z)) !== seed) continue;   // 已处理 / 非同色 / 边界
+    next.set(key(x, y, z), reach);
+    for(const d of N) stack.push([x + d[0], y + d[1], z + d[2]]);
+  }
+  return next;
+}
 
 function editAt(clientX, clientY, remove){
   const r = renderer.domElement.getBoundingClientRect();
@@ -579,6 +609,48 @@ function editAt(clientX, clientY, remove){
   if(remove){ eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey); }
   else { applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE); }
   rebuildChunk(Math.floor(x/CHUNK), Math.floor(z/CHUNK));
+}
+// 球形挖掘：在命中方块处引爆半径 boomR 的球形空腔，删除范围内方块并重建受影响区块
+function boomAt(clientX, clientY){
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
+  ndc.y = -((clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const meshes = [...chunks.values()].map(c => c.mesh.solid);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if(!hit) return;
+  const m = hit.object, id = hit.instanceId;
+  m.getMatrixAt(id, dummy.matrix); dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
+  const cx = Math.round(dummy.position.x), cy = Math.round(dummy.position.y), cz = Math.round(dummy.position.z);
+  const R = boomR, r2 = R * R;
+  edits = explode(edits, cx, cy, cz, R);
+  for(const k of [...falling]){   // 清理被挖掉的掉落集方块
+    const [x,y,z] = k.split(',').map(Number);
+    const dx = x-cx, dy = y-cy, dz = z-cz;
+    if(dx*dx + dy*dy + dz*dz <= r2) falling.delete(k);
+  }
+  const minCX = Math.floor((cx-R)/CHUNK), maxCX = Math.floor((cx+R)/CHUNK);
+  const minCZ = Math.floor((cz-R)/CHUNK), maxCZ = Math.floor((cz+R)/CHUNK);
+  for(let cxi=minCX; cxi<=maxCX; cxi++) for(let czi=minCZ; czi<=maxCZ; czi++) rebuildChunk(cxi, czi);
+  flash('已爆破 ('+cx+','+cy+','+cz+') 半径 '+R);
+}
+// 洪泛填充：在命中方块处填充其相连的同色区域为当前选中笔刷类型(可能跨多区块)
+function fillAt(clientX, clientY){
+  const r = renderer.domElement.getBoundingClientRect();
+  ndc.x = ((clientX - r.left) / r.width) * 2 - 1;
+  ndc.y = -((clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const meshes = [...chunks.values()].map(c => c.mesh.solid);
+  const hit = raycaster.intersectObjects(meshes, false)[0];
+  if(!hit) return;
+  const m = hit.object, id = hit.instanceId;
+  m.getMatrixAt(id, dummy.matrix); dummy.matrix.decompose(dummy.position, dummy.quaternion, dummy.scale);
+  const x = Math.round(dummy.position.x), y = Math.round(dummy.position.y), z = Math.round(dummy.position.z);
+  if(edits.get(key(x, y, z)) == null) return;   // 点空气/流体不填充
+  edits = floodFill(edits, x, y, z, brush, key, PALETTE);
+  for(const c of chunks.keys()){ const [cx, cz] = c.split(',').map(Number); rebuildChunk(cx, cz); }  // 跨区块重建
+  let n = 0; for(const v of edits.values()) if(v !== null && v !== undefined) n++;
+  flash('已填充相连区域 (当前 ' + n + ' 块)');
 }
 
 // ---------- 方块拾取与移动 ----------
@@ -644,6 +716,8 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   if(mode === 'add') editAt(e.clientX, e.clientY, false);
   else if(mode === 'del') editAt(e.clientX, e.clientY, true);
   else if(mode === 'move') movePick(e.clientX, e.clientY);
+  else if(mode === 'boom') boomAt(e.clientX, e.clientY);
+  else if(mode === 'fill') fillAt(e.clientX, e.clientY);
 });
 renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
 
@@ -682,9 +756,12 @@ const DAY_SPEED = 0.06;
 const $ = id => document.getElementById(id);
 $('addBtn').onclick = ()=>{ mode='add'; $('addBtn').classList.add('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 添加'; };
 $('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 删除'; };
-$('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
+$('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
+$('boomBtn').onclick = ()=>{ mode='boom'; $('boomBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('mode').textContent='模式: 爆破挖掘(球形空腔, 半径可调)'; };
+$('fillBtn').onclick = ()=>{ mode='fill'; $('fillBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('mode').textContent='模式: 填充(洪泛相连同色区域)'; };
 $('brush').onchange = e=> brush = e.target.value;
 $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
+$('boomR').onchange = e=>{ boomR = +e.target.value; $('boomRVal').textContent = boomR; };
 // 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色
 $('replaceBtn').onclick = ()=>{
   const from = $('fromType').value, to = $('toType').value;

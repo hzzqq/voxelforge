@@ -51,6 +51,8 @@
       <button id="addBtn" class="on">✛ 添加方块 (左键)</button>
       <button id="delBtn">✕ 删除方块 (右键)</button>
       <button id="moveBtn">✋ 拾取并移动方块</button>
+      <button id="boomBtn">💥 爆破挖掘 (球形)</button>
+      <button id="fillBtn">🪣 填充 (洪泛同色区)</button>
     </div>
     <div class="row">
       <button id="walkBtn">🚶 行走模式 (重力)</button>
@@ -93,6 +95,16 @@
         <option value="1">1×1×1</option>
         <option value="2">2×2×2</option>
         <option value="3">3×3×3</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>爆破半径 <span class="val" id="boomRVal">3</span></label>
+      <select id="boomR">
+        <option value="2">2</option>
+        <option value="3" selected>3</option>
+        <option value="4">4</option>
+        <option value="5">5</option>
+        <option value="6">6</option>
       </select>
     </div>
     <div class="row">
