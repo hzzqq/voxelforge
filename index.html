@@ -55,6 +55,7 @@
       <button id="fillBtn">🪣 填充 (洪泛同色区)</button>
       <button id="fillBoxBtn">🟦 区域填充 (两点对角)</button>
       <button id="lineBtn">〰️ 连线笔刷 (3D 体素直线)</button>
+      <button id="hollowBtn">🕳️ 掏空外壳 (两点对角)</button>
     </div>
     <div class="row">
       <button id="walkBtn">🚶 行走模式 (重力)</button>
@@ -104,7 +105,15 @@
       <select id="brushShape">
         <option value="box">立方体</option>
         <option value="sphere">球形</option>
+        <option value="cylinder">圆柱形</option>
+        <option value="pyramid">金字塔形</option>
+        <option value="scatter">散布形</option>
+        <option value="torus">环形</option>
       </select>
+    </div>
+    <div class="row">
+      <label>散布密度 <span class="val" id="scatterDVal">0.35</span></label>
+      <input type="range" id="scatterD" min="0" max="100" step="1" value="35" />
     </div>
     <div class="row">
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">

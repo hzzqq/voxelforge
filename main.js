@@ -130,6 +130,14 @@ const key = (x,y,z) => x + ',' + y + ',' + z;
 const ckey = (cx,cz) => cx+','+cz;
 const wkey = (x,z) => x + ',' + z;                 // 水体/岩浆状态用「列」坐标
 
+// 确定性伪随机：由世界坐标映射到 [0,1)，用于随机散布笔刷(无需外部 RNG 即可复现)
+function hash01(x, y, z){
+  let h = (Math.imul(x|0, 374761393) ^ Math.imul(y|0, 668265263) ^ Math.imul(z|0, 1274126177)) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
+  h ^= h >>> 16;
+  return ((h >>> 0) % 100000) / 100000;
+}
+
 // ---------- 世界存读档（JSON 导入/导出）----------
 // 将三种体素状态序列化为纯 JSON；deserializeWorld 反序列化回 Map。
 // 纯函数：不依赖 THREE，便于 Node 测试与复用。
@@ -520,7 +528,7 @@ function ensureChunks(){
 // ---------- 编辑 ----------
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3, brushShape = 'box';
+let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3, brushShape = 'box', scatterDensity = 0.35;
 let mirrorOn = false, mirrorAxis = 'x', mirrorCenter = 0;   // 镜像笔刷：沿某轴以 center 为镜面反射每次落笔
 // ---------- 笔刷：纯函数（编辑与测试复用）----------
 // 放置笔刷：从命中点外侧一格 (nx,ny,nz) 起，按 size³ 立方体填充。
@@ -577,6 +585,151 @@ function eraseSphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius,
     if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
     edits.set(k, null);
     falling.delete(k);
+  }
+}
+// 纯函数：圆柱形笔刷——以命中方块外侧 (nx,ny,nz) 为底面中心，XZ 平面半径 radius（整数圆盘，
+// 判定 dx²+dz² <= r²，与球形笔刷同几何），沿 y 从 ny 起填充 height 格。流体/掉落语义与 applyBrush 一致。
+function applyCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
+  const r = Math.max(1, radius|0);
+  const h = (height == null) ? r : Math.max(1, height|0);
+  for(let dy=0; dy<h; dy++){
+    const y = ny + dy;
+    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
+      if(dx*dx + dz*dz > r*r) continue;            // 圆盘外剔除
+      const x = nx+dx, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
+      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
+      edits.set(k, PALETTE[brush]);
+      if(FALL.has(brush)) falling.add(k);
+    }
+  }
+}
+// 纯函数：圆柱形擦除——以 (nx,ny,nz) 为中心、半径 radius、高 height 的圆柱内清除（与 applyCylinderBrush 同几何，仅置空/退掉落集）。
+function eraseCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
+  const r = Math.max(1, radius|0);
+  const h = (height == null) ? r : Math.max(1, height|0);
+  for(let dy=0; dy<h; dy++){
+    const y = ny + dy;
+    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
+      if(dx*dx + dz*dz > r*r) continue;
+      const x = nx+dx, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
+      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
+      edits.set(k, null);
+      falling.delete(k);
+    }
+  }
+}
+// 纯函数：金字塔形笔刷——以 (nx,ny,nz) 为底面中心，XZ 平面底半径 radius、高 height；
+// 自底向上每层收缩一圈(曼哈顿半径 r-dy)，形成四棱锥；流体/掉落语义与 applyBrush 一致。
+function applyPyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
+  const r = Math.max(1, radius|0);
+  const h = Math.min((height == null) ? r : Math.max(1, height|0), r);
+  for(let dy=0; dy<h; dy++){
+    const y = ny + dy;
+    const lim = Math.max(0, r - dy);                 // 该层曼哈顿半径(逐层收缩)
+    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
+      if(Math.abs(dx) + Math.abs(dz) > lim) continue; // 菱形截面外剔除
+      const x = nx+dx, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
+      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
+      edits.set(k, PALETTE[brush]);
+      if(FALL.has(brush)) falling.add(k);
+    }
+  }
+}
+// 纯函数：金字塔形擦除——与 applyPyramidBrush 同几何，仅置空/退掉落集。
+function erasePyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
+  const r = Math.max(1, radius|0);
+  const h = Math.min((height == null) ? r : Math.max(1, height|0), r);
+  for(let dy=0; dy<h; dy++){
+    const y = ny + dy;
+    const lim = Math.max(0, r - dy);
+    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
+      if(Math.abs(dx) + Math.abs(dz) > lim) continue;
+      const x = nx+dx, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
+      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
+      edits.set(k, null);
+      falling.delete(k);
+    }
+  }
+}
+// 纯函数：散布形笔刷——以 (nx,ny,nz) 为底心、半径 radius 的球内，按确定性密度 density 逐格放置：
+// 仅当 hash01(x,y,z) < density 才落块，形成可复现的随机散点云（同坐标同结果，无需外部 RNG）。流体/掉落语义与 applyBrush 一致。
+function applyScatterBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, density, FALL, key, wkey, PALETTE){
+  const r = Math.max(1, radius|0);
+  const d = (density == null) ? 0.35 : Math.max(0, Math.min(1, density));
+  const top = ny + 2*r - 1;
+  for(let dx=-r+1; dx<r; dx++) for(let dy=-r+1; dy<r; dy++) for(let dz=-r+1; dz<r; dz++){
+    if(dx*dx + dy*dy + dz*dz > r*r) continue;        // 球外剔除
+    if(hash01(nx+dx, ny+dy, nz+dz) >= d) continue;   // 低于密度阈值跳过(确定性)
+    const x = nx+dx, y = ny+dy, z = nz+dz;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
+    if(brush === 'water'){ waterCol.set(wk, top); continue; }
+    edits.set(k, PALETTE[brush]);
+    if(FALL.has(brush)) falling.add(k);
+  }
+}
+// 纯函数：散布形擦除——球内全部清除(与 eraseSphereBrush 同几何；密度不影响擦除范围)。
+function eraseScatterBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
+  const r = Math.max(1, radius|0);
+  const top = ny + 2*r - 1;
+  for(let dx=-r+1; dx<r; dx++) for(let dy=-r+1; dy<r; dy++) for(let dz=-r+1; dz<r; dz++){
+    if(dx*dx + dy*dy + dz*dz > r*r) continue;
+    const x = nx+dx, y = ny+dy, z = nz+dz;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(waterCol.has(wk) && waterCol.get(wk) === top) waterCol.delete(wk);
+    if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
+    edits.set(k, null);
+    falling.delete(k);
+  }
+}
+// 纯函数：环形(甜甜圈)笔刷——XZ 平面内以 R=radius 为主半径、tube=max(1,floor(R/3)) 为管半径的实心环面。
+// 中心 (nx,ny,nz) 留空(孔洞)，环体绕 Y 轴一圈；用于做拱门/环形轨道/行星环。几何仅在 XZ 平面扩张，
+// Y 方向只占 [-tube, +tube] 一圈管厚，故不会像球形那样堆满整列。
+function applyTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
+  const R = Math.max(2, radius|0);
+  const t = Math.max(1, Math.floor(R/3));
+  const half = R + t;
+  const top = ny + t;
+  for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
+    const dr = Math.sqrt(dx*dx + dz*dz) - R;
+    if(dr*dr > t*t) continue;                       // 环面主半径外剔除
+    for(let dy=-t; dy<=t; dy++){
+      if(dr*dr + dy*dy > t*t) continue;           // 管截面外剔除
+      const x = nx+dx, y = ny+dy, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
+      if(brush === 'water'){ waterCol.set(wk, top); continue; }
+      edits.set(k, PALETTE[brush]);
+      if(FALL.has(brush)) falling.add(k);
+    }
+  }
+}
+// 纯函数：环形擦除——环面范围内全部清除。
+function eraseTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
+  const R = Math.max(2, radius|0);
+  const t = Math.max(1, Math.floor(R/3));
+  const half = R + t;
+  const top = ny + t;
+  for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
+    const dr = Math.sqrt(dx*dx + dz*dz) - R;
+    if(dr*dr > t*t) continue;
+    for(let dy=-t; dy<=t; dy++){
+      if(dr*dr + dy*dy > t*t) continue;
+      const x = nx+dx, y = ny+dy, z = nz+dz;
+      const k = key(x,y,z), wk = wkey(x,z);
+      if(waterCol.has(wk) && waterCol.get(wk) === top) waterCol.delete(wk);
+      if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
+      edits.set(k, null);
+      falling.delete(k);
+    }
   }
 }
 // 纯函数：批量换方块——遍历 edits，把所有 PALETTE[fromType] 方块替换为 PALETTE[toType]，返回新 Map。
@@ -722,6 +875,22 @@ function lineFill(edits, x0,y0,z0,x1,y1,z1, type, PALETTE){
   return out;
 }
 
+// 纯函数：把实心长方体区域掏空为「外壳」——仅保留 6 个外表面的体素，内部所有方块置为 null（挖空）。
+// 不改变入参（返回新 Map）。典型用途：先用 fillBox 填满一个长方体，再 hollowBox 掏成空心建筑/管道。
+// 边界判定：任一坐标为盒的最小/最大即算外表面（哪怕该处原本就是 null，也不影响内部掏空）。
+function hollowBox(edits, x0,y0,z0,x1,y1,z1){
+  const out = new Map(edits);
+  const a = [Math.min(x0,x1), Math.min(y0,y1), Math.min(z0,z1)];
+  const b = [Math.max(x0,x1), Math.max(y0,y1), Math.max(z0,z1)];
+  for(let x=a[0]; x<=b[0]; x++)
+    for(let y=a[1]; y<=b[1]; y++)
+      for(let z=a[2]; z<=b[2]; z++){
+        const onBoundary = x===a[0]||x===b[0]||y===a[1]||y===b[1]||z===a[2]||z===b[2];
+        if(!onBoundary) out.set(key(x,y,z), null);
+      }
+  return out;
+}
+
 // 纯函数：统计 edits 中各类型方块数量（颜色反查 PALETTE）。可选 waterCol/lavaCol 计入流体列数。
 // 返回 { counts:{类型:数量}, total:实心方块总数, removed:edits 中 null(挖空)数 }；不修改入参。
 function blockStats(edits, PALETTE, waterCol, lavaCol){
@@ -757,9 +926,17 @@ function editAt(clientX, clientY, remove){
   const nx = x + Math.round(n.x), ny = y + Math.round(n.y), nz = z + Math.round(n.z);
   if(remove){
     if(brushShape === 'sphere') eraseSphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
+    else if(brushShape === 'cylinder') eraseCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize, key, wkey);
+    else if(brushShape === 'pyramid') erasePyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize, key, wkey);
+    else if(brushShape === 'scatter') eraseScatterBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
+    else if(brushShape === 'torus') eraseTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
     else eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
   } else {
     if(brushShape === 'sphere') applySphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'cylinder') applyCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'pyramid') applyPyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'scatter') applyScatterBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, scatterDensity, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'torus') applyTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
     else applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
   }
   if(mirrorOn){
@@ -839,6 +1016,20 @@ function lineFillAt(clientX, clientY){
   flash('已连线 ('+brush+')，点一下重新选起点');
   lineAnchor = null;
 }
+// 掏空外壳：第一角点选一角，第二角点按两对角把该实心长方体掏成外壳（内部挖空，仅留表面）
+function hollowBoxAt(clientX, clientY){
+  const p = pickCoord(clientX, clientY);
+  if(!p) return;
+  if(!fillAnchor){
+    fillAnchor = { x: p.x, y: p.y, z: p.z };
+    flash('掏空：已选第一角 ('+p.x+','+p.y+','+p.z+')，点对角完成');
+    return;
+  }
+  edits = hollowBox(edits, fillAnchor.x, fillAnchor.y, fillAnchor.z, p.x, p.y, p.z);
+  rebuildAll();
+  flash('已掏空为外壳，点一下重新选第一角');
+  fillAnchor = null;
+}
 
 // ---------- 方块拾取与移动 ----------
 // 纯函数：根据命中面法线，返回方块应放置的目标整数坐标（面外侧一格）
@@ -911,6 +1102,7 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   else if(mode === 'fill') fillAt(e.clientX, e.clientY);
   else if(mode === 'fillbox') fillBoxAt(e.clientX, e.clientY);
   else if(mode === 'line') lineFillAt(e.clientX, e.clientY);
+  else if(mode === 'hollow') hollowBoxAt(e.clientX, e.clientY);
   recordUndo(prev);
 });
 renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
@@ -955,12 +1147,14 @@ $('boomBtn').onclick = ()=>{ mode='boom'; $('boomBtn').classList.add('on'); $('a
 $('fillBtn').onclick = ()=>{ mode='fill'; $('fillBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBoxBtn').classList.remove('on'); $('mode').textContent='模式: 填充(洪泛相连同色区域)'; };
 $('fillBoxBtn').onclick = ()=>{ mode='fillbox'; $('fillBoxBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('lineBtn').classList.remove('on'); $('mode').textContent='模式: 区域填充(点两对角, 填满长方体)'; fillAnchor=null; };
 $('lineBtn').onclick = ()=>{ mode='line'; $('lineBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('fillBoxBtn').classList.remove('on'); $('mode').textContent='模式: 连线(点起点与终点, 3D 体素直线)'; lineAnchor=null; };
+$('hollowBtn').onclick = ()=>{ mode='hollow'; $('hollowBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('fillBoxBtn').classList.remove('on'); $('lineBtn').classList.remove('on'); $('mode').textContent='模式: 掏空外壳(点两对角, 把长方体挖成空心)'; fillAnchor=null; };
 $('brush').onchange = e=> brush = e.target.value;
 $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
 $('mirrorOn').onchange = e=>{ mirrorOn = e.target.checked; flash(mirrorOn ? '镜像笔刷：开' : '镜像笔刷：关'); };
 $('mirrorAxis').onchange = e=>{ mirrorAxis = e.target.value; };
 $('mirrorCenter').oninput = e=>{ mirrorCenter = +e.target.value || 0; };
-$('brushShape').onchange = e=>{ brushShape = e.target.value; flash(brushShape === 'sphere' ? '笔刷形状：球形' : '笔刷形状：立方体'); };
+$('brushShape').onchange = e=>{ brushShape = e.target.value; flash(brushShape === 'sphere' ? '笔刷形状：球形' : brushShape === 'cylinder' ? '笔刷形状：圆柱形' : brushShape === 'pyramid' ? '笔刷形状：金字塔形' : brushShape === 'scatter' ? '笔刷形状：散布形' : brushShape === 'torus' ? '笔刷形状：环形' : '笔刷形状：立方体'); };
+$('scatterD').oninput = e=>{ scatterDensity = Math.max(0, Math.min(1, +e.target.value/100)); $('scatterDVal').textContent = scatterDensity.toFixed(2); };
 $('boomR').onchange = e=>{ boomR = +e.target.value; $('boomRVal').textContent = boomR; };
 // 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色
 $('replaceBtn').onclick = ()=>{
