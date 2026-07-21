@@ -30,6 +30,11 @@
 - **方块统计（blockStats）**：纯函数 `blockStats(edits,PALETTE,waterCol,lavaCol)` 统计各类型方块数量、实心总数、挖空数，UI 顶部实时显示。
 - **撤销 / 重做（undo / redo）**：`snapshotEdits` + `undoStack`/`redoStack`（上限 64），每次落笔 / 批量操作前快照、操作后入栈；Ctrl+Z 撤销、Ctrl+Y / Ctrl+Shift+Z 重做，跨端一致。
 - **对称镜像笔刷（mirrorEdits）**：纯函数 `mirrorEdits(edits,axis,center,key)` 沿 X/Y/Z 轴以 `center` 为镜面反射每次落笔（原块 + 镜像块），UI 镜像开关 + 轴选择 + 镜面坐标输入，跨区块时整世界重建。
+- **球形笔刷（sphereBrush）**：纯函数 `applySphereBrush` / `eraseSphereBrush` 以落点为中心、按半径在球形邻域放置/擦除方块（返回新 Map、不改原 Map），新增 🔮 球形笔刷模式 + 半径滑块（ci106）。
+- **OBJ 网格导出（exportOBJ）**：纯函数 `exportOBJ(edits, PALETTE)` 把当前编辑表导出为 Wavefront `.obj`（每个实心方块转 6 面 12 三角形、带法线），UI 一键导出当前世界（ci110）。
+- **选区复制 / 粘贴（copy / paste）**：纯函数 `copySelection` 把框选子立方体提取为相对坐标数组、`pasteSelection` 按偏移放回（返回新 Map），UI 复制/粘贴按钮 + 锚点记录，跨区块重建（ci114）。
+- **区域填充（fillBox）**：纯函数 `fillBox` 以两点对角确定一个 AABB 区域、一次性填充为当前笔刷类型（返回新 Map），🟦 区域填充按钮（首次点击设锚点、第二次填充）（ci118）。
+- **3D 连线笔刷（lineFill）**：纯函数 `lineFill` 在两点间生成参数化 3D 体素直线（步数 = 最大轴向跨度，等价 Bresenham），填充当前笔刷类型，〰️ 连线笔刷按钮（ci122）。
 
 ## 🧱 技术栈
 
@@ -89,7 +94,12 @@ npm test
 # _blockstat_test.js (17/17) 方块统计：各类型计数/实心总数/挖空数/不改入参
 # _undo_test.js    (31/31) 撤销重做：快照/往返/容量上限/多步/不改原快照
 # _mirror_test.js  (21/21) 对称镜像：X/Y/Z 反射/镜面自身不重复/不改入参/接线
-# 合计 13 套、196 项全通过
+# _sphere_test.js (16/16) 球形笔刷：中心/近邻/球界/球外保留/原Map不变/体积守恒
+# _exportobj_test.js (11/11) OBJ 导出：6 面/12 三角/法线/偏移/顶点计数
+# _copy_test.js   (12/12) 复制粘贴：子立方体提取/相对坐标/偏移放回/不改原图
+# _fillbox_test.js (17/17) 区域填充：AABB 对角/类型填充/null 清空格/体积守恒
+# _linefill_test.js (19/19) 3D 连线：参数化直线/步数/端点/对角/体积守恒
+# 合计 18 套、271 项全通过
 ```
 
 ## 📄 许可

@@ -53,6 +53,8 @@
       <button id="moveBtn">✋ 拾取并移动方块</button>
       <button id="boomBtn">💥 爆破挖掘 (球形)</button>
       <button id="fillBtn">🪣 填充 (洪泛同色区)</button>
+      <button id="fillBoxBtn">🟦 区域填充 (两点对角)</button>
+      <button id="lineBtn">〰️ 连线笔刷 (3D 体素直线)</button>
     </div>
     <div class="row">
       <button id="walkBtn">🚶 行走模式 (重力)</button>
@@ -95,6 +97,13 @@
         <option value="1">1×1×1</option>
         <option value="2">2×2×2</option>
         <option value="3">3×3×3</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>笔刷形状</label>
+      <select id="brushShape">
+        <option value="box">立方体</option>
+        <option value="sphere">球形</option>
       </select>
     </div>
     <div class="row">
@@ -176,6 +185,11 @@
       <input type="range" id="size" min="20" max="64" value="40" />
     </div>
     <div class="row"><button id="regen">重新生成世界</button></div>
+    <div class="row"><button id="exportObj">⬇ 导出 OBJ 模型</button></div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <button id="copyBtn">⧉ 复制选中</button>
+      <button id="pasteBtn">📋 粘贴(+1,+1,+1)</button>
+    </div>
     <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
       <button id="saveW">💾 保存世界</button>
       <button id="loadW">📂 读取世界</button>

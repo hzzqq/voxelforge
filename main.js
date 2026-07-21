@@ -520,7 +520,7 @@ function ensureChunks(){
 // ---------- 编辑 ----------
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
-let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3;
+let mode = 'add', brush = 'grass', brushSize = 1, boomR = 3, brushShape = 'box';
 let mirrorOn = false, mirrorAxis = 'x', mirrorCenter = 0;   // 镜像笔刷：沿某轴以 center 为镜面反射每次落笔
 // ---------- 笔刷：纯函数（编辑与测试复用）----------
 // 放置笔刷：从命中点外侧一格 (nx,ny,nz) 起，按 size³ 立方体填充。
@@ -546,6 +546,35 @@ function eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, size, key, wk
     const k = key(x,y,z), wk = wkey(x,z);
     if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
     if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
+    edits.set(k, null);
+    falling.delete(k);
+  }
+}
+// 纯函数：球形笔刷——以 (nx,ny,nz) 为中心、半径 radius 的实心球内落笔（球外跳过），其余语义与 applyBrush 一致。
+// 半径 1 => 单格；半径 2 => 3×3×3 内剔除角点；流体列顶面对齐球体顶 y = ny+2r-1。
+function applySphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
+  const r = Math.max(1, radius|0);
+  const top = ny + 2*r - 1;
+  for(let dx=-r+1; dx<r; dx++) for(let dy=-r+1; dy<r; dy++) for(let dz=-r+1; dz<r; dz++){
+    if(dx*dx + dy*dy + dz*dz > r*r) continue;       // 球外剔除
+    const x = nx+dx, y = ny+dy, z = nz+dz;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
+    if(brush === 'water'){ waterCol.set(wk, top); continue; }
+    edits.set(k, PALETTE[brush]);
+    if(FALL.has(brush)) falling.add(k);
+  }
+}
+// 纯函数：球形擦除——以 (nx,ny,nz) 为中心、半径 radius 的球内清除（与 applySphereBrush 同几何，仅置空/退掉落集）。
+function eraseSphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
+  const r = Math.max(1, radius|0);
+  const top = ny + 2*r - 1;
+  for(let dx=-r+1; dx<r; dx++) for(let dy=-r+1; dy<r; dy++) for(let dz=-r+1; dz<r; dz++){
+    if(dx*dx + dy*dy + dz*dz > r*r) continue;
+    const x = nx+dx, y = ny+dy, z = nz+dz;
+    const k = key(x,y,z), wk = wkey(x,z);
+    if(waterCol.has(wk) && waterCol.get(wk) === top) waterCol.delete(wk);
+    if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
     edits.set(k, null);
     falling.delete(k);
   }
@@ -623,6 +652,75 @@ function mirrorEdits(edits, axis, center, key){
   }
   return next;
 }
+// 纯函数：将 edits 导出为 Wavefront OBJ 文本（每个非空 voxel 输出一个单位立方体，8 顶点 + 12 三角面）。
+// 顶点从 1 开始编号；挖空(null)跳过。返回字符串，供下载或离线处理。不修改入参。
+function exportOBJ(edits, key, PALETTE){
+  const lines = ['# VoxelForge export'];
+  let vi = 1;
+  for(const [k, v] of edits){
+    if(v == null) continue;                 // 挖空跳过
+    const [x,y,z] = k.split(',').map(Number);
+    const corners = [
+      [x-0.5,y-0.5,z-0.5],[x+0.5,y-0.5,z-0.5],[x+0.5,y+0.5,z-0.5],[x-0.5,y+0.5,z-0.5],
+      [x-0.5,y-0.5,z+0.5],[x+0.5,y-0.5,z+0.5],[x+0.5,y+0.5,z+0.5],[x-0.5,y+0.5,z+0.5]
+    ];
+    for(const c of corners) lines.push('v ' + c[0] + ' ' + c[1] + ' ' + c[2]);
+    const faces = [[1,2,3,4],[5,6,7,8],[1,4,8,5],[2,3,7,6],[1,5,6,2],[4,3,7,8]];
+    for(const f of faces){
+      lines.push('f ' + (vi+f[0]-1) + ' ' + (vi+f[1]-1) + ' ' + (vi+f[2]-1));
+      lines.push('f ' + (vi+f[0]-1) + ' ' + (vi+f[2]-1) + ' ' + (vi+f[3]-1));
+    }
+    vi += 8;
+  }
+  return lines.join('\n') + '\n';
+}
+// 纯函数：框选复制——返回 [x0..x1]×[y0..y1]×[z0..z1] 包围盒内的非空 voxel 子 Map（挖空跳过）。
+function copySelection(edits, x0,y0,z0,x1,y1,z1){
+  const a=[Math.min(x0,x1),Math.min(y0,y1),Math.min(z0,z1)], b=[Math.max(x0,x1),Math.max(y0,y1),Math.max(z0,z1)];
+  const out = new Map();
+  for(const [k,v] of edits){
+    if(v == null) continue;
+    const [x,y,z] = k.split(',').map(Number);
+    if(x>=a[0]&&x<=b[0]&&y>=a[1]&&y<=b[1]&&z>=a[2]&&z<=b[2]) out.set(k, v);
+  }
+  return out;
+}
+// 纯函数：粘贴——把剪贴板 clip 整体平移 (dx,dy,dz) 后并入 target，返回新 Map（不修改入参；clip 覆盖同名键）。
+function pasteSelection(edits, clip, dx, dy, dz){
+  const out = new Map(edits);
+  for(const [k, v] of clip){
+    const [x,y,z] = k.split(',').map(Number);
+    out.set(key(x+dx, y+dy, z+dz), v);
+  }
+  return out;
+}
+// 纯函数：区域填充——把以 (x0..x1, y0..y1, z0..z1) 为对角顶点的长方体全部置为指定类型
+// （type 为 PALETTE 的键；type 为 null 或 'air' 时清空该区域）。返回新 Map（不修改入参）。
+function fillBox(edits, x0,y0,z0,x1,y1,z1, type, PALETTE){
+  const out = new Map(edits);
+  const a = [Math.min(x0,x1), Math.min(y0,y1), Math.min(z0,z1)];
+  const b = [Math.max(x0,x1), Math.max(y0,y1), Math.max(z0,z1)];
+  const color = (type === null || type === 'air') ? null : PALETTE[type];
+  for(let x=a[0]; x<=b[0]; x++)
+    for(let y=a[1]; y<=b[1]; y++)
+      for(let z=a[2]; z<=b[2]; z++)
+        out.set(key(x,y,z), color);
+  return out;
+}
+// 纯函数：线段笔刷——沿 (x0,y0,z0)→(x1,y1,z1) 用参数化取整生成连续 3D 体素线，
+// 全部置为指定类型（null/air 清空）。返回新 Map（不修改入参）。
+function lineFill(edits, x0,y0,z0,x1,y1,z1, type, PALETTE){
+  const out = new Map(edits);
+  const color = (type === null || type === 'air') ? null : PALETTE[type];
+  const dx=x1-x0, dy=y1-y0, dz=z1-z0;
+  const steps = Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz));
+  if(steps === 0){ out.set(key(x0,y0,z0), color); return out; }
+  for(let i=0;i<=steps;i++){
+    const t = i/steps;
+    out.set(key(Math.round(x0+dx*t), Math.round(y0+dy*t), Math.round(z0+dz*t)), color);
+  }
+  return out;
+}
 
 // 纯函数：统计 edits 中各类型方块数量（颜色反查 PALETTE）。可选 waterCol/lavaCol 计入流体列数。
 // 返回 { counts:{类型:数量}, total:实心方块总数, removed:edits 中 null(挖空)数 }；不修改入参。
@@ -657,8 +755,13 @@ function editAt(clientX, clientY, remove){
   const x = Math.round(dummy.position.x), y = Math.round(dummy.position.y), z = Math.round(dummy.position.z);
   const n = hit.face.normal;
   const nx = x + Math.round(n.x), ny = y + Math.round(n.y), nz = z + Math.round(n.z);
-  if(remove){ eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey); }
-  else { applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE); }
+  if(remove){
+    if(brushShape === 'sphere') eraseSphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
+    else eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
+  } else {
+    if(brushShape === 'sphere') applySphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
+    else applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
+  }
   if(mirrorOn){
     edits = mirrorEdits(edits, mirrorAxis, mirrorCenter, key);
     rebuildAll();                 // 镜像可能落在其他区块，整世界重建以确保可见
@@ -708,6 +811,34 @@ function fillAt(clientX, clientY){
   let n = 0; for(const v of edits.values()) if(v !== null && v !== undefined) n++;
   flash('已填充相连区域 (当前 ' + n + ' 块)');
 }
+// 区域填充：第一角点选锚点，第二角点按当前笔刷类型填充整个长方体（点击命中空白则忽略）
+function fillBoxAt(clientX, clientY){
+  const p = pickCoord(clientX, clientY);
+  if(!p) return;
+  if(!fillAnchor){
+    fillAnchor = { x: p.x, y: p.y, z: p.z };
+    flash('填充：已选第一角 ('+p.x+','+p.y+','+p.z+')，点第二角完成');
+    return;
+  }
+  edits = fillBox(edits, fillAnchor.x, fillAnchor.y, fillAnchor.z, p.x, p.y, p.z, brush, PALETTE);
+  rebuildAll();
+  flash('已填充区域 ('+brush+')，点一下重新选第一角');
+  fillAnchor = null;
+}
+// 线段笔刷：第一角点选起点，第二角点按当前笔刷类型沿 3D 体素线连线（点命中空白则忽略）
+function lineFillAt(clientX, clientY){
+  const p = pickCoord(clientX, clientY);
+  if(!p) return;
+  if(!lineAnchor){
+    lineAnchor = { x: p.x, y: p.y, z: p.z };
+    flash('连线：已选起点 ('+p.x+','+p.y+','+p.z+')，点终点完成');
+    return;
+  }
+  edits = lineFill(edits, lineAnchor.x, lineAnchor.y, lineAnchor.z, p.x, p.y, p.z, brush, PALETTE);
+  rebuildAll();
+  flash('已连线 ('+brush+')，点一下重新选起点');
+  lineAnchor = null;
+}
 
 // ---------- 方块拾取与移动 ----------
 // 纯函数：根据命中面法线，返回方块应放置的目标整数坐标（面外侧一格）
@@ -722,6 +853,9 @@ function commitMove(edits, src, dst, color, keyFn){
 }
 let selected = null;            // {x,y,z}
 let selectedColor = null;
+let clipboard = null;           // 复制选区（Map<"x,y,z", color>）
+let fillAnchor = null;          // 区域填充第一角 {x,y,z}
+let lineAnchor = null;          // 线段笔刷起点 {x,y,z}
 const selBox = new THREE.LineSegments(
   new THREE.EdgesGeometry(new THREE.BoxGeometry(1.04, 1.04, 1.04)),
   new THREE.LineBasicMaterial({ color: 0xffee00 })
@@ -775,6 +909,8 @@ renderer.domElement.addEventListener('pointerdown', e=>{
   else if(mode === 'move') movePick(e.clientX, e.clientY);
   else if(mode === 'boom') boomAt(e.clientX, e.clientY);
   else if(mode === 'fill') fillAt(e.clientX, e.clientY);
+  else if(mode === 'fillbox') fillBoxAt(e.clientX, e.clientY);
+  else if(mode === 'line') lineFillAt(e.clientX, e.clientY);
   recordUndo(prev);
 });
 renderer.domElement.addEventListener('contextmenu', e=> e.preventDefault());
@@ -816,12 +952,15 @@ $('addBtn').onclick = ()=>{ mode='add'; $('addBtn').classList.add('on'); $('delB
 $('delBtn').onclick = ()=>{ mode='del'; $('delBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('mode').textContent='模式: 删除'; };
 $('moveBtn').onclick = ()=>{ mode='move'; $('moveBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('mode').textContent='模式: 拾取并移动(先选后放)'; };
 $('boomBtn').onclick = ()=>{ mode='boom'; $('boomBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('mode').textContent='模式: 爆破挖掘(球形空腔, 半径可调)'; };
-$('fillBtn').onclick = ()=>{ mode='fill'; $('fillBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('mode').textContent='模式: 填充(洪泛相连同色区域)'; };
+$('fillBtn').onclick = ()=>{ mode='fill'; $('fillBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBoxBtn').classList.remove('on'); $('mode').textContent='模式: 填充(洪泛相连同色区域)'; };
+$('fillBoxBtn').onclick = ()=>{ mode='fillbox'; $('fillBoxBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('lineBtn').classList.remove('on'); $('mode').textContent='模式: 区域填充(点两对角, 填满长方体)'; fillAnchor=null; };
+$('lineBtn').onclick = ()=>{ mode='line'; $('lineBtn').classList.add('on'); $('addBtn').classList.remove('on'); $('delBtn').classList.remove('on'); $('moveBtn').classList.remove('on'); $('boomBtn').classList.remove('on'); $('fillBtn').classList.remove('on'); $('fillBoxBtn').classList.remove('on'); $('mode').textContent='模式: 连线(点起点与终点, 3D 体素直线)'; lineAnchor=null; };
 $('brush').onchange = e=> brush = e.target.value;
 $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textContent = brushSize; };
 $('mirrorOn').onchange = e=>{ mirrorOn = e.target.checked; flash(mirrorOn ? '镜像笔刷：开' : '镜像笔刷：关'); };
 $('mirrorAxis').onchange = e=>{ mirrorAxis = e.target.value; };
 $('mirrorCenter').oninput = e=>{ mirrorCenter = +e.target.value || 0; };
+$('brushShape').onchange = e=>{ brushShape = e.target.value; flash(brushShape === 'sphere' ? '笔刷形状：球形' : '笔刷形状：立方体'); };
 $('boomR').onchange = e=>{ boomR = +e.target.value; $('boomRVal').textContent = boomR; };
 // 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色
 $('replaceBtn').onclick = ()=>{
@@ -852,6 +991,9 @@ window.addEventListener('keydown', e=>{
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('regen').onclick = ()=>{ edits.clear(); falling.clear(); lavaCol.clear(); for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
+$('exportObj').onclick = ()=>{ const obj = exportOBJ(edits, key, PALETTE); downloadBlob('voxel-world.obj', new Blob([obj], { type: 'text/plain' })); flash('已导出 OBJ（'+edits.size+' 个方块）'); };
+$('copyBtn').onclick = ()=>{ if(!selected){ flash('先选中一个方块再复制'); return; } clipboard = copySelection(edits, selected.x, selected.y, selected.z, selected.x, selected.y, selected.z); flash('已复制 ' + clipboard.size + ' 个方块'); };
+$('pasteBtn').onclick = ()=>{ if(!clipboard || clipboard.size === 0){ flash('剪贴板为空'); return; } const prev = snapshotEdits(); edits = pasteSelection(edits, clipboard, 1, 1, 1); rebuildAll(); recordUndo(prev); flash('已粘贴（偏移 +1,+1,+1）'); };
 $('walkBtn').onclick = ()=>{
   walkMode = !walkMode;
   controls.enabled = !walkMode;
