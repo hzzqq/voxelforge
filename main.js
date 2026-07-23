@@ -1158,36 +1158,44 @@ function eraseHelixBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, 
 }
 // 纯函数：圆柱形笔刷——以命中方块外侧 (nx,ny,nz) 为底面中心，XZ 平面半径 radius（整数圆盘，
 // 判定 dx²+dz² <= r²，与球形笔刷同几何），沿 y 从 ny 起填充 height 格。流体/掉落语义与 applyBrush 一致。
+// ci374 纯函数：圆柱形笔刷——以 (nx,ny,nz) 为中心、XZ 圆盘半径 radius、竖直高 height。
+// cylinderPoints(R) 生成底面圆盘点表(历史循环边界 dx,dz∈[-(R-1),R-1]，保持既有行为)；
+// cylinderInside(dx,dz,dy,R,H) 为单一真相源(点是否落在笔刷内)。apply/erase 共用，消除几何重复。
+function cylinderPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-(R-1); dx<=R-1; dx++) for(let dz=-(R-1); dz<=R-1; dz++){
+    if(dx*dx + dz*dz <= R*R) add(dx, dz);
+  }
+  return pts;
+}
+function cylinderInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dy < 0 || dy >= H) return false;
+  if(Math.abs(dx) > R-1 || Math.abs(dz) > R-1) return false;   // 与既有循环边界一致
+  return dx*dx + dz*dz <= R*R;
+}
 function applyCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  const h = (height == null) ? r : Math.max(1, height|0);
-  for(let dy=0; dy<h; dy++){
-    const y = ny + dy;
-    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
-      if(dx*dx + dz*dz > r*r) continue;            // 圆盘外剔除
-      const x = nx+dx, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
-      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
-      edits.set(k, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(k);
+  const R = Math.max(1, radius|0);
+  const H = (height == null) ? R : Math.max(1, height|0);
+  const pts = cylinderPoints(R);                       // XZ 足迹；每格形状由 cylinderInside 单一真相源门控
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!cylinderInside(dx, dz, dy, R, H)) continue;
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
     }
   }
 }
-// 纯函数：圆柱形擦除——以 (nx,ny,nz) 为中心、半径 radius、高 height 的圆柱内清除（与 applyCylinderBrush 同几何，仅置空/退掉落集）。
+// 纯函数：圆柱形擦除——与 applyCylinderBrush 同几何(cylinderPoints 足迹 + cylinderInside 单一真相源)，仅置空/退掉落集。
 function eraseCylinderBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
-  const r = Math.max(1, radius|0);
-  const h = (height == null) ? r : Math.max(1, height|0);
-  for(let dy=0; dy<h; dy++){
-    const y = ny + dy;
-    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
-      if(dx*dx + dz*dz > r*r) continue;
-      const x = nx+dx, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
-      edits.set(k, null);
-      falling.delete(k);
+  const R = Math.max(1, radius|0);
+  const H = (height == null) ? R : Math.max(1, height|0);
+  const pts = cylinderPoints(R);
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!cylinderInside(dx, dz, dy, R, H)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
     }
   }
 }
@@ -2043,6 +2051,80 @@ function eraseWheelBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, 
     for(const [dx,dz] of pts) clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
   }
 }
+// ci366 纯函数：斜坡(ramp)笔刷——以 (nx,ny,nz) 为底面中心，XZ 满铺 R×R 方块，沿 +dx 方向逐列升高：
+// 列 dx 的填充层数 top(dx)=round((dx+R)/(2R)*(H-1))+1(从 1 到 H)。rampPoints(R) 生成底面满铺点表，
+// rampInside(dx,dz,dy,R,H) 为单一真相源。apply/erase 共用，保证几何对称、无重复。
+function rampPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++) add(dx, dz);
+  return pts;
+}
+function rampInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dx < -R || dx > R || dz < -R || dz > R) return false;
+  if(dy < 0 || dy >= H) return false;
+  const top = Math.round((dx + R) / (2 * R) * (H - 1)) + 1;   // 沿 +dx 单调升高(1..H)
+  return dy < top;
+}
+function applyRampBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
+  const R = Math.max(1, radius|0), H = Math.max(1, height|0);
+  const pts = rampPoints(R);                          // XZ 足迹单一来源(满铺方格)，消除 apply 内重复双重循环
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!rampInside(dx, dz, dy, R, H)) continue;   // 高度由 rampInside 单一真相源判定
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
+    }
+  }
+}
+function eraseRampBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
+  const R = Math.max(1, radius|0), H = Math.max(1, height|0);
+  const pts = rampPoints(R);
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!rampInside(dx, dz, dy, R, H)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
+    }
+  }
+}
+// ci370 纯函数：桥(bridge)笔刷——以 (nx,ny,nz) 为底面中心，XZ R×R 平台：顶层(deckY=H-1)为整层桥面，
+// 两端 dx=±R 为从底到 deckY-1 的桥墩，桥面以下(中间)留空可穿行。bridgePoints(R) 生成底面(桥墩)点表，
+// bridgeInside(dx,dz,dy,R,H) 为单一真相源。apply/erase 共用。
+function bridgePoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dz=-R; dz<=R; dz++){ add(-R, dz); add(R, dz); }   // 两端桥墩(dy=0 截面)
+  return pts;
+}
+function bridgeInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(2, H|0);
+  if(dx < -R || dx > R || dz < -R || dz > R) return false;
+  if(dy < 0 || dy >= H) return false;
+  const deckY = H - 1;
+  if(dy === deckY) return true;                              // 整层桥面
+  return Math.abs(dx) === R && dy <= deckY - 1;              // 两端桥墩
+}
+// 共享遍历原语：以 bridgeInside 为单一真相源，按 (R,H) 枚举所有命中方块并回调 (x,y,z)。
+// 抽此辅助消除 apply/erase 两函数体内逐字重复的双循环样板。
+function forEachBridgeVoxel(R, H, nx, ny, nz, cb){
+  R = Math.max(1, R|0); H = Math.max(2, H|0);
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+      if(!bridgeInside(dx, dz, dy, R, H)) continue;
+      cb(nx+dx, y, nz+dz);
+    }
+  }
+}
+function applyBridgeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
+  forEachBridgeVoxel(radius, height, nx, ny, nz, (x,y,z)=>
+    writeVoxel(edits, waterCol, lavaCol, falling, x, y, z, brush, FALL, key, wkey, PALETTE));
+}
+function eraseBridgeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
+  forEachBridgeVoxel(radius, height, nx, ny, nz, (x,y,z)=>
+    clearVoxel(edits, waterCol, lavaCol, falling, x, y, z, key, wkey));
+}
 // 纯函数：胶囊形(capsule)笔刷——以命中方块 (nx,ny,nz) 为底面中心，XZ 圆盘半径 radius，竖直高度 height；
 // 中段为全半径圆柱，两端按半球帽收缩，整体呈胶囊/药丸形。流体/掉落语义与 applyBrush 一致。
 function applyCapsuleBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
@@ -2212,38 +2294,47 @@ function eraseHeartBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, 
 
 // 纯函数：金字塔形笔刷——以 (nx,ny,nz) 为底面中心，XZ 平面底半径 radius、高 height；
 // 自底向上每层收缩一圈(曼哈顿半径 r-dy)，形成四棱锥；流体/掉落语义与 applyBrush 一致。
+// ci358 纯函数：金字塔(四向锥台)笔刷——以 (nx,ny,nz) 为底面中心，XZ 曼哈顿菱形截面逐层收缩，层高 h=min(H,R)。
+// pyramidPoints(R) 生成底面(dy=0)菱形点表，pyramidInside(dx,dz,dy,R,H) 为单一真相源。
+// apply/erase 共用单一真相源，消除几何重复(此前 apply/erase 各自内联同一判定，易漂移)。
+function pyramidPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-(R-1); dx<=R-1; dx++) for(let dz=-(R-1); dz<=R-1; dz++){
+    if(Math.abs(dx) + Math.abs(dz) <= R) add(dx, dz);
+  }
+  return pts;
+}
+function pyramidInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  const h = Math.min(H, R);
+  if(dy < 0 || dy >= h) return false;                       // 超过层高(高度被钳到半径)
+  if(Math.abs(dx) > R-1 || Math.abs(dz) > R-1) return false; // 与既有循环边界一致
+  const lim = Math.max(0, R - dy);
+  if(Math.abs(dx) + Math.abs(dz) > lim) return false;       // 曼哈顿菱形外剔除
+  return true;
+}
 function applyPyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  const h = Math.min((height == null) ? r : Math.max(1, height|0), r);
-  for(let dy=0; dy<h; dy++){
-    const y = ny + dy;
-    const lim = Math.max(0, r - dy);                 // 该层曼哈顿半径(逐层收缩)
-    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
-      if(Math.abs(dx) + Math.abs(dz) > lim) continue; // 菱形截面外剔除
-      const x = nx+dx, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
-      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
-      edits.set(k, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(k);
+  const R = Math.max(1, radius|0);
+  const H = (height == null) ? R : Math.max(1, height|0);
+  const pts = pyramidPoints(R);                          // XZ 足迹单一来源(曼哈顿菱形)，消除 apply 内重复派生
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!pyramidInside(dx, dz, dy, R, H)) continue;   // 竖直层高/裁剪由单一真相源负责(不再本地重复 h=min(H,R))
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
     }
   }
 }
-// 纯函数：金字塔形擦除——与 applyPyramidBrush 同几何，仅置空/退掉落集。
+// 纯函数：金字塔形擦除——与 applyPyramidBrush 同几何(pyramidPoints 足迹 + pyramidInside 单一真相源)，仅置空/退掉落集。
 function erasePyramidBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
-  const r = Math.max(1, radius|0);
-  const h = Math.min((height == null) ? r : Math.max(1, height|0), r);
-  for(let dy=0; dy<h; dy++){
-    const y = ny + dy;
-    const lim = Math.max(0, r - dy);
-    for(let dx=-r+1; dx<r; dx++) for(let dz=-r+1; dz<r; dz++){
-      if(Math.abs(dx) + Math.abs(dz) > lim) continue;
-      const x = nx+dx, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
-      edits.set(k, null);
-      falling.delete(k);
+  const R = Math.max(1, radius|0);
+  const H = (height == null) ? R : Math.max(1, height|0);
+  const pts = pyramidPoints(R);
+  for(let dy=0; dy<H; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!pyramidInside(dx, dz, dy, R, H)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
     }
   }
 }
@@ -2281,42 +2372,54 @@ function eraseScatterBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius
 // 纯函数：环形(甜甜圈)笔刷——XZ 平面内以 R=radius 为主半径、tube=max(1,floor(R/3)) 为管半径的实心环面。
 // 中心 (nx,ny,nz) 留空(孔洞)，环体绕 Y 轴一圈；用于做拱门/环形轨道/行星环。几何仅在 XZ 平面扩张，
 // Y 方向只占 [-tube, +tube] 一圈管厚，故不会像球形那样堆满整列。
+// ci362 纯函数：环形(甜甜圈)笔刷——XZ 主半径 R、管半径 tube=max(1,floor(R/3)) 的实心环面；
+// 中心留孔，绕 Y 轴一圈，Y 方向厚 ±tube。torusPoints(R) 生成 dy=0 环截面点表，
+// torusInside(dx,dz,dy,R,H) 为单一真相源(修复此前 apply 对流体列误用常量 top=ny+t 而非逐格 y+1)。
+function torusPoints(R){
+  R = Math.max(2, R|0);
+  const t = Math.max(1, Math.floor(R/3));
+  const half = R + t;
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
+    const dr = Math.sqrt(dx*dx + dz*dz) - R;
+    if(dr*dr <= t*t) add(dx, dz);
+  }
+  return pts;
+}
+function torusInside(dx, dz, dy, R, H){
+  R = Math.max(2, R|0);
+  const t = Math.max(1, Math.floor(R/3));          // 管半径；环面 Y 方向厚 ±t(故 H 由 R 推出为 2t+1，H 仅作签名对齐)
+  if(dy < -t || dy > t) return false;              // 与同侪 *Inside 一致：显式钳制 dy 范围(单一真相源完备)
+  const dr = Math.sqrt(dx*dx + dz*dz) - R;
+  return dr*dr + dy*dy <= t*t;
+}
 function applyTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
   const R = Math.max(2, radius|0);
   const t = Math.max(1, Math.floor(R/3));
   const half = R + t;
-  const top = ny + t;
-  for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
-    const dr = Math.sqrt(dx*dx + dz*dz) - R;
-    if(dr*dr > t*t) continue;                       // 环面主半径外剔除
-    for(let dy=-t; dy<=t; dy++){
-      if(dr*dr + dy*dy > t*t) continue;           // 管截面外剔除
-      const x = nx+dx, y = ny+dy, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
-      if(brush === 'water'){ waterCol.set(wk, top); continue; }
-      edits.set(k, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(k);
-    }
-  }
-}
-// 纯函数：环形擦除——环面范围内全部清除。
-function eraseTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
-  const R = Math.max(2, radius|0);
-  const t = Math.max(1, Math.floor(R/3));
-  const half = R + t;
-  const top = ny + t;
+  const H = 2*t + 1;
   for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
     const dr = Math.sqrt(dx*dx + dz*dz) - R;
     if(dr*dr > t*t) continue;
     for(let dy=-t; dy<=t; dy++){
-      if(dr*dr + dy*dy > t*t) continue;
-      const x = nx+dx, y = ny+dy, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === top) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
-      edits.set(k, null);
-      falling.delete(k);
+      if(!torusInside(dx, dz, dy, R, H)) continue;
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, ny+dy, nz+dz, brush, FALL, key, wkey, PALETTE);
+    }
+  }
+}
+// 纯函数：环形擦除——与 applyTorusBrush 同几何(单一真相源 torusInside)，仅置空/退掉落集。
+function eraseTorusBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
+  const R = Math.max(2, radius|0);
+  const t = Math.max(1, Math.floor(R/3));
+  const half = R + t;
+  const H = 2*t + 1;
+  for(let dx=-half; dx<=half; dx++) for(let dz=-half; dz<=half; dz++){
+    const dr = Math.sqrt(dx*dx + dz*dz) - R;
+    if(dr*dr > t*t) continue;
+    for(let dy=-t; dy<=t; dy++){
+      if(!torusInside(dx, dz, dy, R, H)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, ny+dy, nz+dz, key, wkey);
     }
   }
 }
@@ -2654,6 +2757,8 @@ function editAt(clientX, clientY, remove){
     else if(brushShape === 'hourglass') eraseHourglassBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize*2+1, key, wkey);
     else if(brushShape === 'tree') eraseTreeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize*3, key, wkey);
     else if(brushShape === 'funnel') eraseFunnelBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize*2+1, key, wkey);
+    else if(brushShape === 'ramp') eraseRampBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize, key, wkey);
+    else if(brushShape === 'bridge') eraseBridgeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, brushSize, key, wkey);
     else eraseBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brushSize, key, wkey);
   } else {
     if(brushShape === 'sphere') applySphereBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
@@ -2709,6 +2814,8 @@ function editAt(clientX, clientY, remove){
     else if(brushShape === 'hourglass') applyHourglassBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize*2+1, FALL, key, wkey, PALETTE);
     else if(brushShape === 'tree') applyTreeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize*3, FALL, key, wkey, PALETTE);
     else if(brushShape === 'funnel') applyFunnelBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize*2+1, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'ramp') applyRampBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize, FALL, key, wkey, PALETTE);
+    else if(brushShape === 'bridge') applyBridgeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, brushSize, FALL, key, wkey, PALETTE);
     else applyBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, brushSize, FALL, key, wkey, PALETTE);
   }
   if(mirrorOn){
@@ -2927,7 +3034,7 @@ $('brushSize').onchange = e=>{ brushSize = +e.target.value; $('bsVal').textConte
 $('mirrorOn').onchange = e=>{ mirrorOn = e.target.checked; flash(mirrorOn ? '镜像笔刷：开' : '镜像笔刷：关'); };
 $('mirrorAxis').onchange = e=>{ mirrorAxis = e.target.value; };
 $('mirrorCenter').oninput = e=>{ mirrorCenter = +e.target.value || 0; };
-$('brushShape').onchange = e=>{ brushShape = e.target.value; flash(brushShape === 'sphere' ? '笔刷形状：球形' : brushShape === 'cylinder' ? '笔刷形状：圆柱形' : brushShape === 'pyramid' ? '笔刷形状：金字塔形' : brushShape === 'scatter' ? '笔刷形状：散布形' : brushShape === 'torus' ? '笔刷形状：环形' : brushShape === 'wall' ? '笔刷形状：墙壁' : brushShape === 'diamond' ? '笔刷形状：菱形(八面体)' : brushShape === 'column' ? '笔刷形状：立柱' : brushShape === 'cone' ? '笔刷形状：圆锥' : brushShape === 'stairs' ? '笔刷形状：阶梯' : brushShape === 'dome' ? '笔刷形状：半球(穹顶)' : brushShape === 'prism' ? '笔刷形状：三棱柱' : brushShape === 'tube' ? '笔刷形状：空心圆柱(管道)' : brushShape === 'wedge' ? '笔刷形状：楔形' : brushShape === 'frame' ? '笔刷形状：回字(空心方框)' : brushShape === 'cross' ? '笔刷形状：十字' : brushShape === 'plus' ? '笔刷形状：十字(3D加号)' : brushShape === 'checker' ? '笔刷形状：棋盘' : brushShape === 'lattice' ? '笔刷形状：晶格' : brushShape === 'flatten' ? '笔刷形状：整平(平台)' : brushShape === 'wave' ? '笔刷形状：波形' : brushShape === 'helix' ? '笔刷形状：螺旋(helix)' : brushShape === 'capsule' ? '笔刷形状：胶囊形' : brushShape === 'ring' ? '笔刷形状：圆环(annulus)' : brushShape === 'heart' ? '笔刷形状：心形' : brushShape === 'star' ? '笔刷形状：星形' : brushShape === 'hexprism' ? '笔刷形状：六棱柱' : brushShape === 'shell' ? '笔刷形状：球壳(空心球)' : brushShape === 'pentprism' ? '笔刷形状：五棱柱' : brushShape === 'octprism' ? '笔刷形状：八棱柱' : brushShape === 'gear' ? '笔刷形状：齿轮' : brushShape === 'arch' ? '笔刷形状：拱门' : brushShape === 'frustum' ? '笔刷形状：棱台' : brushShape === 'fence' ? '笔刷形状：栅栏' : brushShape === 'honeycomb' ? '笔刷形状：蜂窝' : brushShape === 'zigzag' ? '笔刷形状：之字' : brushShape === 'snowflake' ? '笔刷形状：雪花' : brushShape === 'arrow' ? '笔刷形状：箭头' : brushShape === 'crystal' ? '笔刷形状：晶体' : brushShape === 'mushroom' ? '笔刷形状：蘑菇' : brushShape === 'bolt' ? '笔刷形状：闪电' : brushShape === 'voronoi' ? '笔刷形状：泰森多边形' : brushShape === 'cloud' ? '笔刷形状：云' : brushShape === 'quincunx' ? '笔刷形状：梅花(五点)' : brushShape === 'xcross' ? '笔刷形状：X形对角' : brushShape === 'concentric' ? '笔刷形状：同心环' : brushShape === 'wheel' ? '笔刷形状：车轮(辐条)' : brushShape === 'spiral' ? '笔刷形状：螺线(平面)' : brushShape === 'hourglass' ? '笔刷形状：沙漏(双锥)' : brushShape === 'tree' ? '笔刷形状：树木' : brushShape === 'funnel' ? '笔刷形状：漏斗' : brushShape === 'ellipsoid' ? '笔刷形状：椭球' : brushShape === 'tetrahedron' ? '笔刷形状：四面体' : '笔刷形状：' + brushShape); };
+$('brushShape').onchange = e=>{ brushShape = e.target.value; flash(brushShape === 'sphere' ? '笔刷形状：球形' : brushShape === 'cylinder' ? '笔刷形状：圆柱形' : brushShape === 'pyramid' ? '笔刷形状：金字塔形' : brushShape === 'scatter' ? '笔刷形状：散布形' : brushShape === 'torus' ? '笔刷形状：环形' : brushShape === 'wall' ? '笔刷形状：墙壁' : brushShape === 'diamond' ? '笔刷形状：菱形(八面体)' : brushShape === 'column' ? '笔刷形状：立柱' : brushShape === 'cone' ? '笔刷形状：圆锥' : brushShape === 'stairs' ? '笔刷形状：阶梯' : brushShape === 'dome' ? '笔刷形状：半球(穹顶)' : brushShape === 'prism' ? '笔刷形状：三棱柱' : brushShape === 'tube' ? '笔刷形状：空心圆柱(管道)' : brushShape === 'wedge' ? '笔刷形状：楔形' : brushShape === 'frame' ? '笔刷形状：回字(空心方框)' : brushShape === 'cross' ? '笔刷形状：十字' : brushShape === 'plus' ? '笔刷形状：十字(3D加号)' : brushShape === 'checker' ? '笔刷形状：棋盘' : brushShape === 'lattice' ? '笔刷形状：晶格' : brushShape === 'flatten' ? '笔刷形状：整平(平台)' : brushShape === 'wave' ? '笔刷形状：波形' : brushShape === 'helix' ? '笔刷形状：螺旋(helix)' : brushShape === 'capsule' ? '笔刷形状：胶囊形' : brushShape === 'ring' ? '笔刷形状：圆环(annulus)' : brushShape === 'heart' ? '笔刷形状：心形' : brushShape === 'star' ? '笔刷形状：星形' : brushShape === 'hexprism' ? '笔刷形状：六棱柱' : brushShape === 'shell' ? '笔刷形状：球壳(空心球)' : brushShape === 'pentprism' ? '笔刷形状：五棱柱' : brushShape === 'octprism' ? '笔刷形状：八棱柱' : brushShape === 'gear' ? '笔刷形状：齿轮' : brushShape === 'arch' ? '笔刷形状：拱门' : brushShape === 'frustum' ? '笔刷形状：棱台' : brushShape === 'fence' ? '笔刷形状：栅栏' : brushShape === 'honeycomb' ? '笔刷形状：蜂窝' : brushShape === 'zigzag' ? '笔刷形状：之字' : brushShape === 'snowflake' ? '笔刷形状：雪花' : brushShape === 'arrow' ? '笔刷形状：箭头' : brushShape === 'crystal' ? '笔刷形状：晶体' : brushShape === 'mushroom' ? '笔刷形状：蘑菇' : brushShape === 'bolt' ? '笔刷形状：闪电' : brushShape === 'voronoi' ? '笔刷形状：泰森多边形' : brushShape === 'cloud' ? '笔刷形状：云' : brushShape === 'quincunx' ? '笔刷形状：梅花(五点)' : brushShape === 'xcross' ? '笔刷形状：X形对角' : brushShape === 'concentric' ? '笔刷形状：同心环' : brushShape === 'wheel' ? '笔刷形状：车轮(辐条)' : brushShape === 'spiral' ? '笔刷形状：螺线(平面)' : brushShape === 'hourglass' ? '笔刷形状：沙漏(双锥)' : brushShape === 'tree' ? '笔刷形状：树木' : brushShape === 'funnel' ? '笔刷形状：漏斗' : brushShape === 'ellipsoid' ? '笔刷形状：椭球' : brushShape === 'tetrahedron' ? '笔刷形状：四面体' : brushShape === 'ramp' ? '笔刷形状：斜坡' : brushShape === 'bridge' ? '笔刷形状：桥' : '笔刷形状：' + brushShape); };
 $('scatterD').oninput = e=>{ scatterDensity = Math.max(0, Math.min(1, +e.target.value/100)); $('scatterDVal').textContent = scatterDensity.toFixed(2); };
 $('boomR').onchange = e=>{ boomR = +e.target.value; $('boomRVal').textContent = boomR; };
 // 批量换方块：替换所有指定类型后，重建所有已加载区块以反映新色

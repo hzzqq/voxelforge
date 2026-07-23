@@ -7,13 +7,17 @@ const ok = (n, c)=>{ if(c) pass++; else { fail++; console.log('  FAIL', n); } };
 
 const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
 function extractFn(name){
-  const re = new RegExp('function ' + name + '\\([\\s\\S]*?\\n\\}\\n');
+  const re = new RegExp('function ' + name + '\\([\\s\\S]*?\\r?\\n\\}\\r?\\n');
   const m = src.match(re);
   if(!m) throw new Error('找不到函数 ' + name);
   return m[0];
 }
 const applyCylinderBrush = eval('(' + extractFn('applyCylinderBrush') + ')');
 const eraseCylinderBrush = eval('(' + extractFn('eraseCylinderBrush') + ')');
+const cylinderPoints = eval('(' + extractFn('cylinderPoints') + ')');
+const cylinderInside = eval('(' + extractFn('cylinderInside') + ')');
+const writeVoxel = eval('(' + extractFn('writeVoxel') + ')');
+const clearVoxel = eval('(' + extractFn('clearVoxel') + ')');
 
 // ---- 依赖（与真实环境一致的最小集）----
 const key = (x,y,z)=> x+','+y+','+z;
