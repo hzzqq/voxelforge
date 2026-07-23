@@ -644,31 +644,41 @@ function eraseWallBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, k
 }
 // 纯函数：菱形(八面体)笔刷——以命中方块外侧 (nx,ny,nz) 为中心，曼哈顿距离 |dx|+|dy|+|dz| <= radius 的体素置为笔刷色。
 // 与球形(欧氏距离)互补：菱形是「尖角八面体」，适合宝石/水晶/装饰尖顶；z 轴同样参与判定(非薄板)。流体/掉落语义与 applyBrush 一致。
+// ci382 重构：diamondPoints(R) 生成 dy=0 曼哈顿菱形足迹，diamondInside(dx,dz,dy,R,H) 为单一真相源(八面体内判定)；
+// apply/erase 共用，消除几何重复与漂移风险，并将原三重全立方扫描收紧为菱形足迹。
+function diamondPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+    if(Math.abs(dx) + Math.abs(dz) <= R) add(dx, dz);   // dy=0 曼哈顿菱形截面(足迹)
+  }
+  return pts;
+}
+function diamondInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(Math.abs(dy) > R) return false;                    // 垂直范围(以 ny 为中心 ±R)
+  return Math.abs(dx) + Math.abs(dy) + Math.abs(dz) <= R;  // 八面体内
+}
 function applyDiamondBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  const top = ny + 2*r - 1;
-  for(let dx=-r; dx<=r; dx++) for(let dy=-r; dy<=r; dy++) for(let dz=-r; dz<=r; dz++){
-    if(Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > r) continue;   // 八面体外剔除
-    const x = nx+dx, y = ny+dy, z = nz+dz;
-    const k = key(x,y,z), wk = wkey(x,z);
-    if(brush === 'lava'){ lavaCol.set(wk, top); continue; }
-    if(brush === 'water'){ waterCol.set(wk, top); continue; }
-    edits.set(k, PALETTE[brush]);
-    if(FALL.has(brush)) falling.add(k);
+  const R = Math.max(1, radius|0);
+  const pts = diamondPoints(R);                          // XZ 足迹单一来源，收紧循环(原全立方扫描)
+  for(let dy=-R; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!diamondInside(dx, dz, dy, R, 1)) continue;    // 八面体判定由 diamondInside 单一真相源负责
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
+    }
   }
 }
-// 纯函数：菱形(八面体)擦除——与 applyDiamondBrush 同几何，仅置空/退掉落集。
+// 纯函数：菱形(八面体)擦除——与 applyDiamondBrush 同几何(diamondPoints 足迹 + diamondInside 单一真相源)，仅置空/退掉落集。
 function eraseDiamondBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
-  const r = Math.max(1, radius|0);
-  const top = ny + 2*r - 1;
-  for(let dx=-r; dx<=r; dx++) for(let dy=-r; dy<=r; dy++) for(let dz=-r; dz<=r; dz++){
-    if(Math.abs(dx) + Math.abs(dy) + Math.abs(dz) > r) continue;
-    const x = nx+dx, y = ny+dy, z = nz+dz;
-    const k = key(x,y,z), wk = wkey(x,z);
-    if(waterCol.has(wk) && waterCol.get(wk) === top) waterCol.delete(wk);
-    if(lavaCol.has(wk) && lavaCol.get(wk) === top) lavaCol.delete(wk);
-    edits.set(k, null);
-    falling.delete(k);
+  const R = Math.max(1, radius|0);
+  const pts = diamondPoints(R);
+  for(let dy=-R; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!diamondInside(dx, dz, dy, R, 1)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
+    }
   }
 }
 // 纯函数：立柱(柱形)笔刷——在 (nx,nz) 处生成 1×1 垂直立柱，从 ny 起向上填充 height 格(=brushSize)。
@@ -698,100 +708,120 @@ function eraseColumnBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, height,
 }
 // 纯函数：圆锥笔刷——以命中方块外侧 (nx,ny,nz) 为锥底中心，底面半径 radius，向上逐层收尖(锥顶一点在 y=ny+radius)。
 // 每层水平圆盘半径 = radius - 层高k(底 0 → 顶 radius)，即 dx²+dz² <= (radius-k)²。与圆柱(等径)区分：圆锥是收尖的。
+// ci390 重构：conePoints(R) 生成底圆足迹，coneInside(dx,dz,dy,R,H) 为单一真相源(逐层收尖判定)；apply/erase 共用。
+function conePoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+    if(dx*dx + dz*dz <= R*R) add(dx, dz);               // 底圆足迹
+  }
+  return pts;
+}
+function coneInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dy < 0 || dy > R) return false;                    // 自底(dy=0)向顶(dy=R)
+  const rh = R - dy;                                    // 该层半径自底 R 递减到顶 0
+  return dx*dx + dz*dz <= rh*rh;
+}
 function applyConeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  for(let k=0; k<=r; k++){
-    const rh = r - k;                                  // 该层水平半径(自底向顶递减)
-    for(let dx=-r; dx<=r; dx++) for(let dz=-r; dz<=r; dz++){
-      if(dx*dx + dz*dz > rh*rh) continue;
-      const x = nx+dx, y = ny+k, z = nz+dz;
-      const kk = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
-      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
-      edits.set(kk, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(kk);
+  const R = Math.max(1, radius|0);
+  const pts = conePoints(R);                            // XZ 足迹单一来源
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!coneInside(dx, dz, dy, R, 1)) continue;      // 逐层收尖由 coneInside 单一真相源门控
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
     }
   }
 }
-// 纯函数：圆锥擦除——与 applyConeBrush 同几何(收尖圆锥)，仅置空/退掉落集。
+// 纯函数：圆锥擦除——与 applyConeBrush 同几何(conePoints 足迹 + coneInside 单一真相源)，仅置空/退掉落集。
 function eraseConeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
-  const r = Math.max(1, radius|0);
-  for(let k=0; k<=r; k++){
-    const rh = r - k;
-    for(let dx=-r; dx<=r; dx++) for(let dz=-r; dz<=r; dz++){
-      if(dx*dx + dz*dz > rh*rh) continue;
-      const x = nx+dx, y = ny+k, z = nz+dz;
-      const kk = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
-      edits.set(kk, null);
-      falling.delete(kk);
+  const R = Math.max(1, radius|0);
+  const pts = conePoints(R);
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!coneInside(dx, dz, dy, R, 1)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
     }
   }
 }
 // 纯函数：阶梯笔刷——从命中点 (nx,ny,nz) 沿 +x 与 +y 同步上升，每个台阶 k 在 x=nx+k 处立一根
 // 从 ny 到 ny+k 的实心柱，整体形成可攀登的楼梯。半径 radius 控制台阶数(0..radius 共 radius+1 级)。
+// ci386 重构：stairsPoints(R) 生成 +x 单列足迹，stairsInside(dx,dz,dy,R,H) 为单一真相源(点级守卫 dz===0 且 0<=dy<=dx)；
+// apply/erase 共用，消除几何重复与漂移风险，并将隐式 z 固定/台阶高度假设显式化。
+function stairsPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [];
+  for(let dx=0; dx<=R; dx++) pts.push([dx, 0]);          // 仅沿 +x 一直线(z=0)的列足迹
+  return pts;
+}
+function stairsInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dz !== 0) return false;                             // 仅单 z 平面(显式化原隐式 z=nz 假设)
+  if(dx < 0 || dx > R) return false;
+  if(dy < 0 || dy > dx) return false;                    // 第 dx 级从 ny 填到 ny+dx(显式化原隐式台阶高度)
+  return true;
+}
 function applyStairsBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  for(let k=0; k<=r; k++){
-    const x = nx + k;
-    const z = nz;
-    for(let y=ny; y<=ny+k; y++){
-      const kk = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
-      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
-      edits.set(kk, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(kk);
+  const R = Math.max(1, radius|0);
+  const pts = stairsPoints(R);                           // XZ 足迹单一来源
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!stairsInside(dx, dz, dy, R, 1)) continue;     // 台阶高度由 stairsInside 单一真相源门控
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
     }
   }
 }
-// 纯函数：阶梯擦除——与 applyStairsBrush 同几何，仅置空/退掉落集。
+// 纯函数：阶梯擦除——与 applyStairsBrush 同几何(stairsPoints 足迹 + stairsInside 单一真相源)，仅置空/退掉落集。
 function eraseStairsBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
-  const r = Math.max(1, radius|0);
-  for(let k=0; k<=r; k++){
-    const x = nx + k;
-    const z = nz;
-    for(let y=ny; y<=ny+k; y++){
-      const kk = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
-      edits.set(kk, null);
-      falling.delete(kk);
+  const R = Math.max(1, radius|0);
+  const pts = stairsPoints(R);
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!stairsInside(dx, dz, dy, R, 1)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
     }
   }
 }
 // 纯函数：半球(穹顶)笔刷——以命中 (nx,ny,nz) 为底面中心，XZ 半径 radius 圆盘内按
 // h = round(sqrt(r²-dx²-dz²)) 形成穹顶高度剖面，从 ny 向上实心填充，构成可栖居的圆顶。
+// ci378 重构：domePoints(R) 生成 XZ 圆盘足迹(消除整块方形扫描)，domeInside(dx,dz,dy,R,H) 为
+// 单一真相源(点是否落在穹顶内)；apply/erase 共用，消除几何重复与漂移风险。
+function domePoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+    if(dx*dx + dz*dz <= R*R) add(dx, dz);            // XZ 圆盘足迹
+  }
+  return pts;
+}
+function domeInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dy < 0) return false;                            // 仅向上生长
+  const d2 = dx*dx + dz*dz;
+  if(d2 > R*R) return false;                          // 圆盘外
+  const h = Math.round(Math.sqrt(R*R - d2));          // 该列穹顶高度
+  return dy <= h;                                     // 0..h 实心
+}
 function applyDomeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, FALL, key, wkey, PALETTE){
-  const r = Math.max(1, radius|0);
-  for(let dx=-r; dx<=r; dx++) for(let dz=-r; dz<=r; dz++){
-    const d2 = dx*dx + dz*dz;
-    if(d2 > r*r) continue;                       // 圆盘外剔除
-    const h = Math.round(Math.sqrt(r*r - d2));   // 0..r 的圆顶高度
-    for(let y=ny; y<=ny+h; y++){
-      const x = nx+dx, z = nz+dz;
-      const k = key(x,y,z), wk = wkey(x,z);
-      if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
-      if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
-      edits.set(k, PALETTE[brush]);
-      if(FALL.has(brush)) falling.add(k);
+  const R = Math.max(1, radius|0);
+  const pts = domePoints(R);                          // XZ 足迹单一来源，消除重复方形扫描
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!domeInside(dx, dz, dy, R, 1)) continue;    // 高度由 domeInside 单一真相源判定
+      writeVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, brush, FALL, key, wkey, PALETTE);
     }
   }
 }
-// 纯函数：半球(穹顶)擦除——与 applyDomeBrush 同几何，仅置空/退掉落集。
+// 纯函数：半球(穹顶)擦除——与 applyDomeBrush 同几何(domePoints 足迹 + domeInside 单一真相源)，仅置空/退掉落集。
 function eraseDomeBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, key, wkey){
-  const r = Math.max(1, radius|0);
-  for(let dx=-r; dx<=r; dx++) for(let dz=-r; dz<=r; dz++){
-    const d2 = dx*dx + dz*dz;
-    if(d2 > r*r) continue;
-    const h = Math.round(Math.sqrt(r*r - d2));
-    for(let y=ny; y<=ny+h; y++){
-      const x = nx+dx, z = nz+dz;
-      const kk = key(x,y,z), wk = wkey(x,z);
-      if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
-      if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
-      edits.set(kk, null);
-      falling.delete(kk);
+  const R = Math.max(1, radius|0);
+  const pts = domePoints(R);
+  for(let dy=0; dy<=R; dy++){ const y = ny+dy;
+    for(const [dx,dz] of pts){
+      if(!domeInside(dx, dz, dy, R, 1)) continue;
+      clearVoxel(edits, waterCol, lavaCol, falling, nx+dx, y, nz+dz, key, wkey);
     }
   }
 }
@@ -1378,11 +1408,29 @@ function gearInside(dx, dz, R){
   return a <= period*f;
 }
 // 拱门 XZ 判定：下半(dz<=0)实心半圆盘(拱座)，上半(dz>0)半圆环(拱)。
-function archInside(dx, dz, R){
+// 拱门 XZ 判定(内部辅助)：下半(dz<=0)实心半圆盘(拱座)，上半(dz>0)半圆环(拱)。
+function archXZInside(dx, dz, R){
   const dist = Math.hypot(dx, dz);
   const innerR = R*0.6;
   if(dz <= 0) return dist <= R;
   return dist >= innerR && dist <= R;
+}
+// ci394 重构：archInside 升格为完整 3D 单一真相源(dx,dz,dy,R,H)——显式钳制 dy∈[0,H)。
+// 此前仅 2D 判定 archInside(dx,dz,R) 忽略竖直范围，apply/erase 无法依赖单一真相源做点级门控。
+function archInside(dx, dz, dy, R, H){
+  R = Math.max(1, R|0); H = Math.max(1, H|0);
+  if(dy < 0 || dy >= H) return false;                     // 竖直范围由 H 钳制(补全为完整 3D 真相源)
+  return archXZInside(dx, dz, R);
+}
+// 拱门 XZ 足迹：复用 2D 判定构造 (dx,dz) 列足迹，供 apply/erase 单层遍历使用。
+function archPoints(R){
+  R = Math.max(1, R|0);
+  const pts = [], seen = new Set();
+  const add = (dx,dz)=>{ const k = dx + ',' + dz; if(!seen.has(k)){ seen.add(k); pts.push([dx,dz]); } };
+  for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
+    if(archXZInside(dx, dz, R)) add(dx, dz);              // XZ 拱形足迹
+  }
+  return pts;
 }
 // 蜂窝 XZ 判定：外接半径 R 的实心盘，按六角网格挖去圆形孔。
 function honeycombInside(dx, dz, R){
@@ -1484,9 +1532,10 @@ function eraseGearBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, h
 // 纯函数：拱门(arch)笔刷——XZ 拱形截面，竖直高度 H。
 function applyArchBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, radius, height, FALL, key, wkey, PALETTE){
   const R = Math.max(1, radius|0), H = Math.max(1, height|0);
+  const pts = archPoints(R);                              // XZ 拱形足迹单一来源
   for(let dy=0; dy<H; dy++){ const y = ny+dy;
-    for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
-      if(!archInside(dx, dz, R)) continue;
+    for(const [dx,dz] of pts){
+      if(!archInside(dx, dz, dy, R, H)) continue;        // 竖直范围与拱形由 archInside 单一真相源门控
       const x = nx+dx, z = nz+dz, k = key(x,y,z), wk = wkey(x,z);
       if(brush === 'lava'){ lavaCol.set(wk, y+1); continue; }
       if(brush === 'water'){ waterCol.set(wk, y+1); continue; }
@@ -1496,9 +1545,10 @@ function applyArchBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, brush, ra
 }
 function eraseArchBrush(edits, waterCol, lavaCol, falling, nx, ny, nz, radius, height, key, wkey){
   const R = Math.max(1, radius|0), H = Math.max(1, height|0);
+  const pts = archPoints(R);
   for(let dy=0; dy<H; dy++){ const y = ny+dy;
-    for(let dx=-R; dx<=R; dx++) for(let dz=-R; dz<=R; dz++){
-      if(!archInside(dx, dz, R)) continue;
+    for(const [dx,dz] of pts){
+      if(!archInside(dx, dz, dy, R, H)) continue;
       const x = nx+dx, z = nz+dz, k = key(x,y,z), wk = wkey(x,z);
       if(waterCol.has(wk) && waterCol.get(wk) === y+1) waterCol.delete(wk);
       if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
