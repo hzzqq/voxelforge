@@ -153,8 +153,24 @@ function serializeWorld(edits, waterCol, lavaCol){
 }
 function deserializeWorld(data){
   const d = (data && Array.isArray(data.edits)) ? data : { edits: [], water: [], lava: [] };
-  const toMap = (arr) => { const m = new Map(); if(Array.isArray(arr)) for(const e of arr){ if(Array.isArray(e) && e.length >= 2) m.set(e[0], e[1]); } return m; };
-  return { edits: toMap(d.edits), waterCol: toMap(d.water), lavaCol: toMap(d.lava) };
+  // ci462 加固：键必须是 n 段有限整数坐标（edits="x,y,z"，water/lava="x,z"），值必须合法，
+  // 否则损坏/恶意 JSON（坏键、对象值、NaN）会污染 Map 并连累渲染与统计。
+  const goodKey = (k, parts) => {
+    if(typeof k !== 'string') return false;
+    const c = k.split(',');
+    if(c.length !== parts) return false;
+    return c.every(s => s !== '' && Number.isFinite(+s) && Number.isInteger(+s));
+  };
+  const toMap = (arr, parts, goodVal) => {
+    const m = new Map();
+    if(Array.isArray(arr)) for(const e of arr){
+      if(Array.isArray(e) && e.length >= 2 && goodKey(e[0], parts) && goodVal(e[1])) m.set(e[0], e[1]);
+    }
+    return m;
+  };
+  const editVal  = v => v === null || (typeof v === 'number' && Number.isFinite(v));   // null=挖空占位
+  const fluidVal = v => typeof v === 'number' && Number.isFinite(v);
+  return { edits: toMap(d.edits, 3, editVal), waterCol: toMap(d.water, 2, fluidVal), lavaCol: toMap(d.lava, 2, fluidVal) };
 }
 
 // ---------- 水体流动（简单元胞流体：表面均衡 + 体积守恒）----------
@@ -587,6 +603,24 @@ function clearVoxel(edits, waterCol, lavaCol, falling, x, y, z, key, wkey){
   if(lavaCol.has(wk) && lavaCol.get(wk) === y+1) lavaCol.delete(wk);
   edits.set(k, null);
   falling.delete(k);
+}
+// 纯函数：体素统计——给定 edits: Map<"x,y,z", blockId|null>，计算实体块数、包围盒与体积。
+// 用于 HUD「本次编辑了多少方块」、导出前体量估算、撤销/重做的差异度量。跳过 null(已擦除) 占位。
+function volumeStats(edits){
+  let count=0, minX=Infinity, minY=Infinity, minZ=Infinity, maxX=-Infinity, maxY=-Infinity, maxZ=-Infinity;
+  for(const k of edits.keys()){
+    if(edits.get(k) === null) continue;                 // 擦除占位不计入实体块
+    const p = String(k).split(','); if(p.length !== 3) continue;
+    const x = +p[0], y = +p[1], z = +p[2];
+    if(!isFinite(x) || !isFinite(y) || !isFinite(z)) continue;
+    count++;
+    if(x < minX) minX = x; if(x > maxX) maxX = x;
+    if(y < minY) minY = y; if(y > maxY) maxY = y;
+    if(z < minZ) minZ = z; if(z > maxZ) maxZ = z;
+  }
+  if(count === 0) return { count:0, empty:true, minX:0,minY:0,minZ:0,maxX:0,maxY:0,maxZ:0, width:0,height:0,depth:0, volume:0 };
+  const width = maxX-minX+1, height = maxY-minY+1, depth = maxZ-minZ+1;
+  return { count, empty:false, minX,minY,minZ,maxX,maxY,maxZ, width,height,depth, volume: width*height*depth };
 }
 // 纯函数：球形笔刷——以 (nx,ny,nz) 为中心、半径 radius 的实心球内落笔（球外跳过），其余语义与 applyBrush 一致。
 // 半径 1 => 单格；半径 2 => 3×3×3 内剔除角点；流体列顶面对齐球体顶 y = ny+2r-1。
@@ -3468,7 +3502,9 @@ $('loadW').onclick = ()=>{
     const w = deserializeWorld(d);
     amp = (typeof d.amp === 'number') ? d.amp : amp;
     cavesOn = (typeof d.cavesOn === 'boolean') ? d.cavesOn : cavesOn;
+    const prevEdits = snapshotEdits();   // ci462 隐性修复：读档进撤销栈——此前加载后 Ctrl+Z 会弹回旧世界快照吞掉整个新档
     edits = w.edits; waterCol = w.waterCol; lavaCol = w.lavaCol;
+    recordUndo(prevEdits);               // 替换后入栈：「加载」本身可撤销，且 redo 栈被正确清空
     falling.clear();          // 加载后掉落集重置（不持久化瞬态物理）
     SNOW_LINE = Math.floor(amp * 0.7) + 4;
     $('amp').value = amp; $('ampVal').textContent = amp;
@@ -3512,7 +3548,9 @@ $('worldFile').onchange = e=>{
       const w = deserializeWorld(d);
       amp = (typeof d.amp === 'number') ? d.amp : amp;
       cavesOn = (typeof d.cavesOn === 'boolean') ? d.cavesOn : cavesOn;
+      const prevEdits = snapshotEdits();   // ci462：文件导入同样入撤销栈（与读档一致）
       edits = w.edits; waterCol = w.waterCol; lavaCol = w.lavaCol;
+      recordUndo(prevEdits);
       falling.clear();
       SNOW_LINE = Math.floor(amp * 0.7) + 4;
       $('amp').value = amp; $('ampVal').textContent = amp;
