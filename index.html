@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>VoxelForge · 体素世界引擎</title>
 <style>
   :root{ --bg:#0a0c10; --panel:#12161d; --line:#1f2730; --txt:#cdd6e0; --accent:#7ee787; }
@@ -31,15 +32,59 @@
     border-top:1px solid var(--line);padding-top:12px;}
   input[type=range]{width:100%;}
   .val{float:right;color:var(--accent);}
+  #voxelLoader{position:fixed;inset:0;z-index:2147483647;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;}
+  #voxelLoader .spinner{width:40px;height:40px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:vspin 1s linear infinite;}
+  @keyframes vspin{to{transform:rotate(360deg);}}
+  #voxelLoader .txt{color:#9fb0c0;font-size:13px;}
+  #voxelLoader.err .spinner{display:none;}
+  #voxelLoader.err .txt{color:#ff5370;}
 </style>
 <script type="importmap">
 { "imports": {
-  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  "three": "./vendor/three.module.js",
+  "three/addons/": "./vendor/jsm/"
 }}
+</script>
+<script>
+(function(){
+  function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function showErr(msg, detail){
+    var bar = document.getElementById('wb_err_bar');
+    if(!bar){
+      bar = document.createElement('div');
+      bar.id = 'wb_err_bar';
+      bar.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#3a0d12;color:#ff8a9b;font:13px/1.6 ui-monospace,Menlo,Consolas,monospace;padding:10px 16px;border-bottom:1px solid #ff5370;white-space:pre-wrap;box-shadow:0 2px 12px rgba(0,0,0,.5);display:flex;flex-wrap:wrap;gap:10px;align-items:center;';
+      (document.body||document.documentElement).appendChild(bar);
+      bar.addEventListener('click', function(e){
+        var act = e.target && e.target.dataset && e.target.dataset.act;
+        if(act==='close'){ bar.style.display='none'; }
+        else if(act==='detail'){ var d=document.getElementById('wb_err_detail'); if(d) d.style.display=(d.style.display==='none'?'block':'none'); }
+      });
+    }
+    var hint = (detail && /加载失败|three|module/i.test(detail||msg)) ? '\n（资源/模块加载失败：请检查网络或刷新页面）' : '';
+    bar.innerHTML = '<span style="flex:1;min-width:220px">⚠ 运行异常：'+escapeHtml(msg)+escapeHtml(hint)+'</span>'+
+      '<button data-act="detail" style="background:#5a1420;color:#ffb3c0;border:1px solid #ff5370;border-radius:6px;padding:4px 10px;cursor:pointer;font:12px monospace;">详情</button>'+
+      '<button data-act="close" style="background:transparent;color:#ff8a9b;border:1px solid #ff5370;border-radius:6px;padding:4px 10px;cursor:pointer;font:12px monospace;" title="关闭">×</button>'+
+      (detail ? '<pre id="wb_err_detail" style="display:none;flex-basis:100%;margin:6px 0 0;padding:8px;background:#2a0a0e;border:1px solid #ff5370;border-radius:6px;white-space:pre-wrap;max-height:200px;overflow:auto;">'+escapeHtml(detail)+'</pre>' : '');
+    bar.style.display='flex';
+    clearTimeout(bar._t); bar._t=setTimeout(function(){ bar.style.display='none'; }, 8000);
+  }
+  window.addEventListener('error', function(e){
+    var m = (e && e.message) ? e.message
+      : (e && e.target && (e.target.src||e.target.href)) ? ('资源加载失败：'+(e.target.src||e.target.href))
+      : '未知错误';
+    var d = (e && e.error && e.error.stack) ? e.error.stack : ((e && e.target && (e.target.src||e.target.href)) ? (e.target.src||e.target.href) : '');
+    showErr(m, d);
+  }, true);
+  window.addEventListener('unhandledrejection', function(e){
+    var r = (e && e.reason) || {};
+    showErr((r && r.message) ? r.message : (r || '未处理的异步异常'), r && r.stack);
+  });
+})();
 </script>
 </head>
 <body>
+<div id="voxelLoader"><div class="spinner"></div><div class="txt">正在加载 3D 引擎与世界…</div></div>
 <div id="app">
   <div id="stage">
     <div id="hud">方块数 <b id="count">0</b> · 拖拽转视角 / 滚轮缩放<br><b id="mode">模式: 添加</b> · 点击编辑 · <b>WASD</b> 漫游无限世界</div>
@@ -292,5 +337,7 @@
   </div>
 </div>
 <script type="module" src="./main.js"></script>
+<script src="./help.js"></script>
+<script src="./settings.js"></script>
 </body>
 </html>

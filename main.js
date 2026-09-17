@@ -3632,3 +3632,11 @@ setInterval(simulateFalling, 350);   // 掉落方块模拟（每 0.35s 步进一
 setInterval(simulateLava, 700);      // 岩浆流动模拟（每 0.7s 步进一次：黏滞流动 + 冷却成石 + 点燃）
 document.getElementById('mode').textContent='模式: 添加';
 tick();
+
+try {
+  const loader = document.getElementById('voxelLoader');
+  if(loader) loader.style.display = 'none';
+} catch(e) {
+  const loader = document.getElementById('voxelLoader');
+  if(loader){ loader.classList.add('err'); loader.querySelector('.txt').textContent = '3D 引擎加载失败：' + e.message; }
+}

@@ -2,7 +2,7 @@
 // 验证 mirrorEdits 沿轴以 center 为镜面反射坐标，原块+镜像块齐全，镜面自身不重复，且不改入参。
 const fs = require('fs');
 const path = require('path');
-const NODE = 'C:/Users/Administrator/.workbuddy/binaries/node/versions/22.22.2/node.exe';
+const NODE = process.execPath;
 const { execSync } = require('child_process');
 
 const dir = __dirname;

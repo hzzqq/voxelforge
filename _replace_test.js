@@ -6,11 +6,17 @@ let pass = 0, fail = 0;
 const ok = (n, c)=>{ if(c) pass++; else { fail++; console.log('  FAIL', n); } };
 
 const src = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+// brace 计数抽取（CRLF 免疫）：main.js 为 CRLF 时，基于 \n\}\n 的正则会抽取失败，改用逐字符括号配对（同 ci458 _brush_test.js）。
 function extractFn(name){
-  const re = new RegExp('function ' + name + '\\([\\s\\S]*?\\n\\}\\n');
-  const m = src.match(re);
-  if(!m) throw new Error('找不到函数 ' + name);
-  return m[0];
+  const start = src.indexOf('function ' + name + '(');
+  if(start < 0) throw new Error('找不到函数 ' + name);
+  let depth = 0, i = src.indexOf('{', start);
+  for(; i < src.length; i++){
+    const c = src[i];
+    if(c === '{') depth++;
+    else if(c === '}'){ depth--; if(depth === 0) return src.slice(start, i+1); }
+  }
+  throw new Error('函数 ' + name + ' 括号不匹配');
 }
 const replaceType = eval('(' + extractFn('replaceType') + ')');
 
