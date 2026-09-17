@@ -128,6 +128,7 @@ function recordUndo(prev){ if(prev && !editsEqual(prev, edits)){ undoStack.push(
 function undoEdit(){ if(undoStack.length === 0) return false; redoStack.push(new Map(edits)); edits = undoStack.pop(); rebuildAll(); return true; }
 function redoEdit(){ if(redoStack.length === 0) return false; undoStack.push(new Map(edits)); edits = redoStack.pop(); rebuildAll(); return true; }
 let lavaOn = true;         // 岩浆模拟总开关
+let lightOn = true;        // 光照烘焙总开关（关闭则地下保持原亮度）
 const key = (x,y,z) => x + ',' + y + ',' + z;
 const ckey = (cx,cz) => cx+','+cz;
 const wkey = (x,z) => x + ',' + z;                 // 水体/岩浆状态用「列」坐标
@@ -245,6 +246,63 @@ function stepFalling(falling, edits, isSolid, keyFn, chunkKey){
   return touched;
 }
 
+// ---------- 简单光照烘焙（萤石点光源 BFS；地下按光强变暗，README「简单光照烘焙」落地） ----------
+const LIGHT_MAX = 15;               // 光照等级上限（Minecraft 惯例 0-15）
+const LIGHT_MIN_FACTOR = 0.25;      // 零光照最低亮度系数（保留轮廓可见性）
+// 纯函数：多源 BFS 光照传播——从光源格(level=maxLevel)向 6 邻域空气逐格衰减 1，
+// 实心方块阻挡光不进入。返回 Map<"x,y,z", level>（含光源格本身）。BFS 层序保证
+// 首次到达即最高光照；maxCells 兜底防海量光源时规模失控。
+function bakeLight(sources, isSolid, keyFn, maxLevel, maxCells){
+  maxLevel = (maxLevel == null) ? LIGHT_MAX : maxLevel;
+  maxCells = (maxCells == null) ? 60000 : maxCells;
+  const light = new Map();
+  if(!sources || sources.length === 0) return light;   // 零光源快速路径
+  let frontier = [];
+  for(const s of sources){
+    const k = keyFn(s.x, s.y, s.z);
+    if(!light.has(k)){ light.set(k, maxLevel); frontier.push([s.x, s.y, s.z, maxLevel]); }
+  }
+  const N6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  while(frontier.length){
+    const nextFrontier = [];
+    for(const [x, y, z, lv] of frontier){
+      if(lv <= 1) continue;
+      for(const [dx,dy,dz] of N6){
+        const nx = x+dx, ny = y+dy, nz = z+dz, nk = keyFn(nx,ny,nz);
+        if(light.has(nk)) continue;              // 已有光照（先到者更亮）
+        if(isSolid(nx, ny, nz)) continue;        // 实心阻挡
+        light.set(nk, lv - 1);
+        if(light.size >= maxCells) return light; // 规模兜底
+        nextFrontier.push([nx, ny, nz, lv - 1]);
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return light;
+}
+// 纯函数：实心方块采光 = 6 邻域光照最大值（方块内部不可入，靠邻接空气/光源采光）
+function blockLightAt(x, y, z, lightMap, keyFn){
+  const N6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  let best = 0;
+  for(const [dx,dy,dz] of N6){
+    const lv = lightMap.get(keyFn(x+dx, y+dy, z+dz));
+    if(lv != null && lv > best) best = lv;
+  }
+  return best;
+}
+// 纯函数：收集 edits 中的萤石光源（萤石仅经用户放置产生，edits 为唯一事实源）
+function collectGlowSources(editsMap, glowHex){
+  const out = [];
+  for(const [k, v] of editsMap){
+    if(v === glowHex){ const c = k.split(','); out.push({ x:+c[0], y:+c[1], z:+c[2] }); }
+  }
+  return out;
+}
+// 纯函数：光照等级 → 亮度系数（0 光 → LIGHT_MIN_FACTOR，满光 → 1）
+function lightFactor(level){
+  return LIGHT_MIN_FACTOR + (1 - LIGHT_MIN_FACTOR) * (Math.max(0, Math.min(LIGHT_MAX, level)) / LIGHT_MAX);
+}
+
 // ---------- 岩浆流体（黏滞 + 冷却成石 + 点燃可燃物）----------
 // lava:   Map<"x,z", 岩浆面y(整数)>（列状，类比 water）
 // water:  Map<"x,z", 水面y>（用于冷却检测；邻接水 → 岩浆冷却为石头、水被消耗）
@@ -360,10 +418,15 @@ function buildChunk(cx, cz, lod){
   const glow = new THREE.InstancedMesh(geo, glowMat, PER_CHUNK);
   glow.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   let si = 0, wi = 0, li = 0, gi = 0;
-  const place = (x,y,z,color)=>{
+  // 光照烘焙：收集萤石光源并 BFS 传播（无萤石时 lightMap 为空，地下取最低亮度系数）
+  const lightMap = lightOn ? bakeLight(collectGlowSources(edits, PALETTE.glowstone), (x,y,z)=> voxelColor(x,y,z) !== null, key) : null;
+  const place = (x,y,z,color,underground)=>{
     if(si >= PER_CHUNK) return;
     dummy.position.set(x, y, z); dummy.updateMatrix();
-    solid.setMatrixAt(si, dummy.matrix); col.setHex(color); solid.setColorAt(si, col); si++;
+    solid.setMatrixAt(si, dummy.matrix);
+    col.setHex(color);
+    if(underground && lightMap) col.multiplyScalar(lightFactor(blockLightAt(x, y, z, lightMap, key)));
+    solid.setColorAt(si, col); si++;
   };
   for(let lx = 0; lx < CHUNK; lx++){
     for(let lz = 0; lz < CHUNK; lz++){
@@ -377,7 +440,7 @@ function buildChunk(cx, cz, lod){
         if(gi < PER_CHUNK){ dummy.position.set(x, y, z); dummy.updateMatrix(); glow.setMatrixAt(gi, dummy.matrix); gi++; }
         continue;
       }
-      place(x, y, z, c);
+      place(x, y, z, c, y < h);   // 严格低于地形顶的方块参与光照烘焙（地表/空中视为天空照明）
       }
       // 低洼列初始化为海平面（仅注入一次），并用水体状态渲染流动后的水面
       const wk = wkey(x, z);
@@ -3486,6 +3549,11 @@ $('caves').onchange = e=>{
 };
 $('fall').onchange = e=>{ fallOn = e.target.checked; };
 $('lava').onchange = e=>{ lavaOn = e.target.checked; };
+// 光照烘焙开关：切换后全量重建以应用/撤销亮度系数
+$('light').onchange = e=>{
+  lightOn = e.target.checked;
+  for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
+};
 // ---------- 世界存档（localStorage：地形种子 + 洞穴开关 + 编辑）----------
 function flash(msg){ const m = $('mode'); const old = m.textContent; m.textContent = msg; setTimeout(()=>{ m.textContent = walkMode ? '模式: 行走(重力)' : '模式: 添加'; }, 1500); }
 $('saveW').onclick = ()=>{
