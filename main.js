@@ -48,10 +48,14 @@ sun.position.set(0.55, 0.72, -0.42).multiplyScalar(100);
 scene.add(sun);
 
 // ---------- 噪声 ----------
+// hash 修复（本轮）：旧版末步 (n ^ (n>>16)) 中算术右移符号扩展使最高位自相异或恒 0，
+// 返回值永远落在 [0, 0.5)（实测十分位仅 0~4 有值），连锁导致 fbm≤0.45 → heightAt 最高 9
+// （雪线 12 雪顶永不生成）、fbm3≤0.45 → 金/钻石/煤三种矿石永不生成。改用 Math.imul 精确
+// 32 位乘 + 无符号右移混淆，值域恢复 [0,1)。
 function hash(x, z){
-  let n = (x | 0) * 374761393 + (z | 0) * 668265263;
-  n = (n ^ (n >> 13)) * 1274126177;
-  return ((n ^ (n >> 16)) >>> 0) / 4294967295;
+  let n = ((x | 0) * 374761393 + (z | 0) * 668265263) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
 }
 const smooth = t => t * t * (3 - 2 * t);
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -66,11 +70,11 @@ function fbm(x, z){
   for(let o = 0; o < 4; o++){ a += amp * vnoise(x*f, z*f); f *= 2; amp *= 0.5; }
   return a;
 }
-// ---- 3D 噪声（洞穴雕刻用）----
+// ---- 3D 噪声（洞穴雕刻用）----（hash3 与 hash 同源同修：旧版值域同样砍半至 [0,0.5)）
 function hash3(x, y, z){
-  let n = (x|0)*374761393 + (y|0)*668265263 + (z|0)*1274126177;
-  n = (n ^ (n >> 13)) * 1274126177;
-  return ((n ^ (n >> 16)) >>> 0) / 4294967295;
+  let n = ((x | 0) * 374761393 + (y | 0) * 668265263 + (z | 0) * 1274126177) | 0;
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
 }
 function vnoise3(x, y, z){
   const xi=Math.floor(x), yi=Math.floor(y), zi=Math.floor(z);
@@ -88,7 +92,9 @@ function fbm3(x, y, z){
   return a;
 }
 function caveAt(x, y, z){
-  return fbm3(x*0.13 + 5.0, y*0.13 + 9.0, z*0.13 + 2.0) > 0.3;
+  // 阈值随 hash 修复重校：旧 0.3 是对砍半值域 [0,0.45] 调的（实际 ~25% 空穴率）；
+  // 修复后全值域分布下 0.3 会掏空 90% 石层，0.5 恢复 ~28% 的原有洞穴密度。
+  return fbm3(x*0.13 + 5.0, y*0.13 + 9.0, z*0.13 + 2.0) > 0.5;
 }
 
 // ---------- 洞穴连通性：BFS 分量统计 + 孤岛连通化 ----------
@@ -169,7 +175,8 @@ function bakeCaveLinks(){
 const PALETTE = {
   grass: 0x6ab04c, dirt: 0x8a5a2b, stone: 0x8d949c, iron: 0xb0b8c0, gold: 0xffd24a,
   diamond: 0x6ffcff, coal: 0x33373d, sand: 0xe2cf8a, gravel: 0x8a8d91,
-  water: 0x3a7bd5, lava: 0xe05626, wood: 0x9c6b3f, leaf: 0x3f8f3f, snow: 0xeaf2f7, glowstone: 0xfff2a8
+  water: 0x3a7bd5, lava: 0xe05626, wood: 0x9c6b3f, leaf: 0x3f8f3f, snow: 0xeaf2f7, glowstone: 0xfff2a8,
+  savanna: 0xb8b04a, jungle: 0x2f7d33, taiga: 0x5e7d6b, cactus: 0x4f9e4f
 };
 const FALL = new Set(['sand','gravel']);   // 参与重力掉落的方块笔刷（沙/砾石）
 const GLOW = new Set(['glowstone']);       // 自发光方块（独立 InstancedMesh + emissive 材质渲染）
@@ -520,6 +527,39 @@ function stepLava(lava, water, t, flammable, maxDepth, gap){
 }
 
 function heightAt(x, z){ return Math.floor(fbm(x*0.08 + 10, z*0.08 + 10) * amp) + 4; }
+
+// ---------- 生物群系：温度×湿度双场（低频 fbm）+ 海拔/水岸门控 ----------
+// 纯函数：h 可选传入（调用方已有 heightAt 结果时省一次重算）。九群系：
+// alpine(高山雪原 h≥SNOW_LINE) / beach(水岸 h≤WATER+1) / desert(沙漠) / jungle(丛林) /
+// savanna(稀树草原) / plains(平原) / forest(森林) / taiga(针叶林) / tundra(冻原)。
+// 温度/湿度用与地形场不同尺度+偏移的低频 fbm，保证群系呈大块连续分布而非逐格碎斑。
+function biomeAt(x, z, h){
+  if(h === undefined) h = heightAt(x, z);
+  if(h >= SNOW_LINE) return 'alpine';
+  if(h <= WATER + 1) return 'beach';
+  const t = fbm(x * 0.018 + 311.7, z * 0.018 + 97.3);   // 温度场 [0, 0.9375]
+  const m = fbm(x * 0.021 + 503.1, z * 0.021 + 211.9);  // 湿度场
+  if(t > 0.58) return m > 0.44 ? 'jungle' : 'desert';
+  if(t < 0.38) return m > 0.44 ? 'taiga' : 'tundra';
+  return m > 0.55 ? 'forest' : m < 0.36 ? 'savanna' : 'plains';
+}
+
+// ---------- 分群系植被：纯函数，返回 null 或 {kind, trunkH} ----------
+// 确定性由 hash(x,z) 保证；密度：丛林 > 针叶林 > 森林 > 平原 > 沙漠 > 稀树草原；
+// beach/alpine/tundra 裸地无植被。plains 保持旧版 0.06 概率 + 3..5 干高语义。
+function plantFor(biome, x, z){
+  const r = hash(x, z);
+  switch(biome){
+    case 'jungle':  return r <= 0.12  ? { kind: 'tree',   trunkH: 4 + Math.floor(hash(z, x) * 4) } : null;
+    case 'taiga':   return r <= 0.09  ? { kind: 'pine',   trunkH: 4 + Math.floor(hash(z, x) * 3) } : null;
+    case 'forest':  return r <= 0.085 ? { kind: 'tree',   trunkH: 3 + Math.floor(hash(z, x) * 3) } : null;
+    case 'plains':  return r <= 0.06  ? { kind: 'tree',   trunkH: 3 + Math.floor(hash(z, x) * 3) } : null;
+    case 'desert':  return r <= 0.03  ? { kind: 'cactus', trunkH: 2 + Math.floor(hash(z, x) * 2) } : null;
+    case 'savanna': return r <= 0.015 ? { kind: 'tree',   trunkH: 3 + Math.floor(hash(z, x) * 3) } : null;
+    default: return null;    // beach / alpine / tundra
+  }
+}
+
 function voxelColor(x, y, z){
   const k = key(x,y,z);
   if(edits.has(k)) return edits.get(k);          // 编辑优先
@@ -527,18 +567,24 @@ function voxelColor(x, y, z){
   const h = heightAt(x, z);
   if(y > h) return null;
   if(y === h){
-    if(h >= SNOW_LINE) return PALETTE.snow;       // 雪顶
-    if(h <= WATER + 1) return PALETTE.sand;       // 水岸沙地
-    return PALETTE.grass;
+    const b = biomeAt(x, z, h);
+    if(b === 'beach' || b === 'desert') return PALETTE.sand;
+    if(b === 'alpine' || b === 'tundra') return PALETTE.snow;
+    if(b === 'savanna') return PALETTE.savanna;
+    if(b === 'jungle') return PALETTE.jungle;
+    if(b === 'taiga') return PALETTE.taiga;
+    return PALETTE.grass;                        // plains / forest
   }
-  if(y >= h - 2) return (h <= WATER + 1) ? PALETTE.sand : PALETTE.dirt;
+  if(y >= h - 2) return (biomeAt(x, z, h) === 'desert') ? PALETTE.sand : PALETTE.dirt;
   if(cavesOn && y < h - 1 && caveAt(x, y, z)) return null;   // 石层中用 3D 噪声雕刻洞穴
-  // 矿石：石层中按深度 + 3D 噪声生成（越深越稀有/贵重），与洞穴不冲突
+  // 矿石：石层中按深度 + 3D 噪声生成（越深越稀有/贵重），与洞穴不冲突。
+  // 阈值随 hash 修复重校（旧 0.6/0.45/0.35/-0.7 是对砍半值域调的：金/钻石永生成、
+  // n<-0.7 对非负 fbm3 恒死分支致煤绝迹、铁泛滥 40%）；按修复后分位校准。
   const n = fbm3(x * 0.6 + 2.3, y * 0.6 + 4.1, z * 0.6 + 7.7);
-  if(y < h - 5 && n > 0.6) return PALETTE.diamond;   // 最深：钻石（最稀）
-  if(y < h - 3 && n > 0.45) return PALETTE.gold;     // 较深：金（少）
-  if(n > 0.35) return PALETTE.iron;                  // 普遍：铁（约 15%）
-  if(n < -0.7) return PALETTE.coal;                 // 煤炭（约 3%）
+  if(y < h - 5 && n > 0.62) return PALETTE.diamond;   // 最深：钻石（最稀 ~5%）
+  if(y < h - 3 && n > 0.60) return PALETTE.gold;      // 较深：金（少 ~6%）
+  if(n > 0.55) return PALETTE.iron;                   // 普遍：铁（约 15%）
+  if(n < 0.27) return PALETTE.coal;                   // 煤炭（约 4%，低值带）
   return PALETTE.stone;
 }
 
@@ -609,23 +655,38 @@ function buildChunk(cx, cz, lod){
       }
     }
   }
-  // 程序化树木：仅在草坡（非雪/沙/水）以低概率生成（远处 LOD 省略）
+  // 程序化植被：按群系分布（远处 LOD 省略）——沙漠仙人掌 / 针叶林锥形树 / 其余阔叶树球冠
   if(!lod){
   for(let lx = 0; lx < CHUNK; lx++){
     for(let lz = 0; lz < CHUNK; lz++){
       const x = cx*CHUNK + lx, z = cz*CHUNK + lz;
       const h = heightAt(x, z);
-      if(h < WATER + 2 || h >= SNOW_LINE) continue;
-      if(hash(x, z) > 0.06) continue;
-      const trunkH = 3 + Math.floor(hash(z, x) * 3);
-      const baseY = h + 1, topY = baseY + trunkH - 1;
+      if(h < WATER + 2) continue;                 // 水岸不种
+      const plant = plantFor(biomeAt(x, z, h), x, z);
+      if(!plant) continue;
+      const baseY = h + 1, topY = baseY + plant.trunkH - 1;
+      if(plant.kind === 'cactus'){                // 仙人掌：绿柱无冠
+        for(let y = baseY; y <= topY; y++) place(x, y, z, PALETTE.cactus);
+        continue;
+      }
       for(let y = baseY; y <= topY; y++) place(x, y, z, PALETTE.wood);
-      for(let dy = -2; dy <= 1; dy++){
-        const ly = topY + dy, rad = dy < 0 ? 2 : 1;
-        for(let dx = -rad; dx <= rad; dx++) for(let dz = -rad; dz <= rad; dz++){
-          if(dx === 0 && dz === 0 && dy < 1) continue;
-          if(dx*dx + dz*dz > rad*rad + 1) continue;
-          place(x+dx, ly, z+dz, PALETTE.leaf);
+      if(plant.kind === 'pine'){                  // 锥形树冠：随高度收窄
+        for(let dy = 0; dy <= 2; dy++){
+          const ly = topY + 1 - dy, rad = 2 - dy;
+          for(let dx = -rad; dx <= rad; dx++) for(let dz = -rad; dz <= rad; dz++){
+            if(dx === 0 && dz === 0 && dy === 2) continue;
+            if(dx*dx + dz*dz > rad*rad + 1) continue;
+            place(x+dx, ly, z+dz, PALETTE.leaf);
+          }
+        }
+      } else {                                    // 阔叶球冠（原语义）
+        for(let dy = -2; dy <= 1; dy++){
+          const ly = topY + dy, rad = dy < 0 ? 2 : 1;
+          for(let dx = -rad; dx <= rad; dx++) for(let dz = -rad; dz <= rad; dz++){
+            if(dx === 0 && dz === 0 && dy < 1) continue;
+            if(dx*dx + dz*dz > rad*rad + 1) continue;
+            place(x+dx, ly, z+dz, PALETTE.leaf);
+          }
         }
       }
     }
