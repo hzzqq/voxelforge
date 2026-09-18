@@ -3534,14 +3534,49 @@ function moveStep(){
   return d;
 }
 
-// ---------- 行走模式（重力 / 落地碰撞 / 跳跃）----------
-let walkMode = false, velY = 0, onGround = false;
+// ---------- 行走模式（惯性移动 / 游泳 / 重力 / 落地碰撞 / 跳跃）----------
+let walkMode = false, velY = 0, velX = 0, velZ = 0, onGround = false;
 const GRAV = 22, EYE = 1.8, JUMP = 8.5;
 // 某整数坐标是否为实心方块（用于碰撞判定）
 function solidAt(x, y, z){ return voxelColor(Math.round(x), Math.round(y), Math.round(z)) !== null; }
 function surfaceY(x, z){
   const h = heightAt(Math.round(x), Math.round(z));
   return h + 8 + EYE;   // 顶部方块(h+8)之上 + 视高
+}
+
+// ---------- 第一人称物理（纯函数，供 tick 调用与测试） ----------
+// 水平惯性移动：wish 方向 (fx,fz)（可非单位，内部归一化）按 accel 加速；
+// 无输入按摩擦系数指数衰减；超速按 maxSpeed 等比截断。返回 {vx, vz}。
+function stepMove(vx, vz, fx, fz, dt, opt){
+  opt = opt || {};
+  const accel = (opt.accel == null) ? 24 : opt.accel;
+  const friction = (opt.friction == null) ? 8 : opt.friction;
+  const maxSpeed = (opt.maxSpeed == null) ? 2.5 : opt.maxSpeed;
+  const len = Math.hypot(fx, fz);
+  if(len > 0){ vx += (fx / len) * accel * dt; vz += (fz / len) * accel * dt; }
+  else { const d = Math.max(0, 1 - friction * dt); vx *= d; vz *= d; }
+  const sp = Math.hypot(vx, vz);
+  if(sp > maxSpeed){ const k = maxSpeed / sp; vx *= k; vz *= k; }
+  return { vx, vz };
+}
+// 竖直速度积分：空中纯重力；水中浮力抵消大部分重力（净下沉很慢），swimUp 上浮，
+// 水中速度受指数阻尼。速度约定同 velY：正值向上。返回新 vy。
+function stepSwim(vy, swimUp, inWater, dt, opt){
+  opt = opt || {};
+  const grav = (opt.grav == null) ? GRAV : opt.grav;
+  const buoy = (opt.buoy == null) ? 19 : opt.buoy;
+  const drag = (opt.drag == null) ? 3 : opt.drag;
+  const swimAccel = (opt.swimAccel == null) ? 14 : opt.swimAccel;
+  if(!inWater) return vy - grav * dt;
+  vy -= (grav - buoy) * dt;            // 净下沉加速度 = grav - buoy（很小）
+  if(swimUp) vy += swimAccel * dt;     // 空格上浮
+  vy *= Math.max(0, 1 - drag * dt);    // 水的阻尼
+  return vy;
+}
+// 玩家身体参考高度 (x,y,z) 是否没入水中：该列有水（waterCol: "x,z" -> 水面 y）且 y 不高于水面
+function inWaterAt(x, y, z, water, wkeyFn){
+  const s = water.get(wkeyFn(Math.round(x), Math.round(z)));
+  return s != null && y <= s;
 }
 
 // ---------- 昼夜循环 ----------
@@ -3615,7 +3650,7 @@ $('walkBtn').onclick = ()=>{
   controls.enabled = !walkMode;
   $('walkBtn').classList.toggle('on', walkMode);
   document.getElementById('mode').textContent = walkMode ? '模式: 行走(重力)' : '模式: 添加';
-  if(walkMode){ velY = 0; onGround = true; camera.position.y = surfaceY(camera.position.x, camera.position.z); }
+  if(walkMode){ velY = 0; velX = 0; velZ = 0; onGround = true; camera.position.y = surfaceY(camera.position.x, camera.position.z); }
 };
 $('dayBtn').onclick = ()=>{
   dayNight = !dayNight;
@@ -3723,26 +3758,36 @@ function tick(){
   const dt = Math.min(0.05, (now - lastTick) / 1000); lastTick = now;
   const move = moveStep();
   if(walkMode){
+    // 第一人称物理：水中低加速/低速 + 游泳浮力；陆地/空中惯性走跑 + 纯重力
+    const inWater = inWaterAt(camera.position.x, camera.position.y - 1.0, camera.position.z, waterCol, wkey);
+    const opt = inWater ? { accel: 14, friction: 6, maxSpeed: 1.5 } : { accel: 24, friction: 8, maxSpeed: 2.5 };
+    const nv = stepMove(velX, velZ, move.x, move.z, dt, opt);
+    velX = nv.vx; velZ = nv.vz;
     // 水平碰撞：逐轴判定，遇实心方块则该轴不前进（不能穿墙）
-    if(move.lengthSq() > 0){
+    const dx = velX * dt, dz = velZ * dt;
+    if(dx !== 0 || dz !== 0){
       const r = 0.35;
-      const dirX = Math.sign(move.x), dirZ = Math.sign(move.z);
-      const tryX = camera.position.x + move.x;
+      const dirX = Math.sign(dx), dirZ = Math.sign(dz);
+      const tryX = camera.position.x + dx;
       if(!solidAt(tryX + dirX*r, camera.position.y - 1.0, camera.position.z) &&
          !solidAt(tryX + dirX*r, camera.position.y,       camera.position.z))
         camera.position.x = tryX;
-      const tryZ = camera.position.z + move.z;
+      const tryZ = camera.position.z + dz;
       if(!solidAt(camera.position.x, camera.position.y - 1.0, tryZ + dirZ*r) &&
          !solidAt(camera.position.x, camera.position.y,       tryZ + dirZ*r))
         camera.position.z = tryZ;
     }
-    // 跳跃
-    if(keys[' '] && onGround){ velY = JUMP; onGround = false; }
-    // 重力 + 落地
-    velY -= GRAV * dt;
+    // 跳跃 / 游泳：水中空格上浮（浮力+阻尼），陆上空格起跳，空中纯重力
+    if(inWater){
+      velY = stepSwim(velY, !!keys[' '], true, dt);
+    } else {
+      if(keys[' '] && onGround){ velY = JUMP; onGround = false; }
+      velY = stepSwim(velY, false, false, dt);
+    }
     camera.position.y += velY * dt;
     const gy = surfaceY(camera.position.x, camera.position.z);
     if(camera.position.y <= gy){ camera.position.y = gy; velY = 0; onGround = true; }
+    else { onGround = false; }   // 离地（走落悬崖/腾空）后不能再跳
     controls.target.set(camera.position.x, camera.position.y - 0.3, camera.position.z + 1);
     camera.lookAt(controls.target);
   } else {
