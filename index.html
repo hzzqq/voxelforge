@@ -320,7 +320,10 @@
       <button id="exportW">⬇ 导出 JSON</button>
       <button id="importW">⬆ 导入 JSON</button>
     </div>
-    <div class="row"><button id="statsBtn">📊 方块统计</button></div>
+    <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <button id="statsBtn" title="统计当前世界的方块构成">📊 方块统计</button>
+      <button id="exportChunk" title="只导出视线中心所在区块的编辑差异（导入时自动合并，不替换全图）">🧩 导出区块</button>
+    </div>
     <div class="row" style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
       <button id="undoBtn">↩ 撤销</button>
       <button id="redoBtn">↪ 重做</button>

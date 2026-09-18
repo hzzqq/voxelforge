@@ -248,6 +248,74 @@ function deserializeWorld(data){
   return { edits: toMap(d.edits, 3, editVal), waterCol: toMap(d.water, 2, fluidVal), lavaCol: toMap(d.lava, 2, fluidVal) };
 }
 
+// ---------- 区块化持久化（按 CHUNK 边界切分的增量存档）----------
+// splitChunks：把全局三张状态 Map 按 size×size 区块边界分桶（纯函数，供按区块导出/增量保存）。
+// 3D 键 "x,y,z"（edits）/ 2D 键 "x,z"（水体/岩浆列）都按 x/z 归属；floor 除法保证负坐标正确分桶。
+function splitChunks(edits, waterCol, lavaCol, size){
+  const groups = new Map();
+  const put = (m, parts, slot) => {
+    for(const [k, v] of m){
+      if(typeof k !== 'string') continue;
+      const c = k.split(',');
+      if(c.length !== parts) continue;
+      const x = +c[0], z = +c[parts-1];
+      if(!Number.isInteger(x) || !Number.isInteger(z)) continue;
+      const gk = ckey(Math.floor(x/size), Math.floor(z/size));
+      let g = groups.get(gk);
+      if(!g){ g = { edits: new Map(), water: new Map(), lava: new Map() }; groups.set(gk, g); }
+      g[slot].set(k, v);
+    }
+  };
+  put(edits, 3, 'edits'); put(waterCol, 2, 'water'); put(lavaCol, 2, 'lava');
+  return groups;
+}
+function serializeChunk(name, g){
+  return { v: 1, chunk: name, edits: [...g.edits.entries()], water: [...g.water.entries()], lava: [...g.lava.entries()] };
+}
+// deserializeChunk：校验并还原单区块数据；chunk 名必须为 "cx,cz" 整数，且全部键归属该区块
+// （防手改 JSON 跨区块污染；坏输入返回 null，由调用方提示）。
+function deserializeChunk(data, size){
+  if(!data || typeof data.chunk !== 'string') return null;
+  const cc = data.chunk.split(',');
+  if(cc.length !== 2) return null;
+  const cx = +cc[0], cz = +cc[1];
+  if(!Number.isInteger(cx) || !Number.isInteger(cz)) return null;
+  const goodKey = (k, parts) => {
+    if(typeof k !== 'string') return false;
+    const c = k.split(',');
+    if(c.length !== parts) return false;
+    return c.every(s => s !== '' && Number.isFinite(+s) && Number.isInteger(+s));
+  };
+  const inChunk = (k, parts) => {
+    const c = k.split(',');
+    const x = +c[0], z = +c[parts-1];
+    return x >= cx*size && x < (cx+1)*size && z >= cz*size && z < (cz+1)*size;
+  };
+  const toMap = (arr, parts, goodVal) => {
+    const m = new Map();
+    if(Array.isArray(arr)) for(const e of arr){
+      if(Array.isArray(e) && e.length >= 2 && goodKey(e[0], parts) && inChunk(e[0], parts) && goodVal(e[1])) m.set(e[0], e[1]);
+    }
+    return m;
+  };
+  const editVal  = v => v === null || (typeof v === 'number' && Number.isFinite(v));
+  const fluidVal = v => typeof v === 'number' && Number.isFinite(v);
+  return { name: data.chunk,
+    edits: toMap(data.edits, 3, editVal),
+    water: toMap(data.water, 2, fluidVal),
+    lava:  toMap(data.lava, 2, fluidVal) };
+}
+// mergeChunks：把若干 deserializeChunk 结果合并回三张全局 Map（同键后者覆盖——增量补丁语义）。
+function mergeChunks(list){
+  const edits = new Map(), waterCol = new Map(), lavaCol = new Map();
+  for(const g of (list || [])){
+    for(const [k, v] of g.edits) edits.set(k, v);
+    for(const [k, v] of g.water) waterCol.set(k, v);
+    for(const [k, v] of g.lava) lavaCol.set(k, v);
+  }
+  return { edits, waterCol, lavaCol };
+}
+
 // ---------- 水体流动（简单元胞流体：表面均衡 + 体积守恒）----------
 // water: Map<"x,z", 水面y(整数)>；t(x,z): 返回该列地形顶高度。
 // 每步：有水格把水分给「更低」的 4 邻（含干涸但更低的地面），直到相邻表面趋于一致；体积严格守恒。
@@ -3707,6 +3775,14 @@ $('exportW').onclick = ()=>{
   downloadBlob('voxel-world.json', new Blob([JSON.stringify(data)], { type: 'application/json' }));
   flash('已导出 voxel-world.json ✓');
 };
+// 区块级导出：只导出视线中心所在区块的编辑差异（增量备份/分享，导入时合并不替换全图）
+$('exportChunk').onclick = ()=>{
+  const cx = Math.floor(controls.target.x / CHUNK), cz = Math.floor(controls.target.z / CHUNK);
+  const name = ckey(cx, cz);
+  const g = splitChunks(edits, waterCol, lavaCol, CHUNK).get(name) || { edits: new Map(), water: new Map(), lava: new Map() };
+  downloadBlob('voxel-chunk_' + cx + '_' + cz + '.json', new Blob([JSON.stringify(serializeChunk(name, g))], { type: 'application/json' }));
+  flash('已导出区块 ' + name + ' ✓');
+};
 $('importW').onclick = ()=> $('worldFile').click();
 function updateStats(){
   const out = document.getElementById('statsOut'); if(!out) return;
@@ -3727,6 +3803,21 @@ $('worldFile').onchange = e=>{
   r.onload = ()=>{
     try{
       const d = JSON.parse(r.result);
+      if(d && typeof d.chunk === 'string'){
+        // 区块存档：合并导入（不替换全图），仅重建该区块网格
+        const g = deserializeChunk(d, CHUNK);
+        if(!g){ flash('区块存档损坏'); return; }
+        const [gcx, gcz] = g.name.split(',').map(Number);
+        const prevEdits = snapshotEdits();
+        for(const [k, v] of g.edits) edits.set(k, v);
+        for(const [k, v] of g.water) waterCol.set(k, v);
+        for(const [k, v] of g.lava) lavaCol.set(k, v);
+        recordUndo(prevEdits);               // 合并同样入撤销栈，Ctrl+Z 可整体回退本次导入
+        falling.clear();
+        rebuildChunk(gcx, gcz);
+        flash('已合并区块 ' + g.name + ' ✓');
+        return;
+      }
       const w = deserializeWorld(d);
       amp = (typeof d.amp === 'number') ? d.amp : amp;
       cavesOn = (typeof d.cavesOn === 'boolean') ? d.cavesOn : cavesOn;
