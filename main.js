@@ -91,6 +91,80 @@ function caveAt(x, y, z){
   return fbm3(x*0.13 + 5.0, y*0.13 + 9.0, z*0.13 + 2.0) > 0.3;
 }
 
+// ---------- 洞穴连通性：BFS 分量统计 + 孤岛连通化 ----------
+// 3D 噪声洞穴天然可能产生孤岛（玩家不可达）。caveStats 对给定窗口做 N6（面相邻）flood fill；
+// bakeCaveLinks 把体积 >= 2 的孤岛用「中心+头顶+水平四邻」加粗直线隧道连通到最大分量质心，
+// 结果写入生成期修正层 caveLinks（不污染玩家 edits 存档层；cavesOn=false 时不计算）。
+const N6 = [[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+function caveStats(isAir, x0, x1, y0, y1, z0, z1, minComp){
+  const seen = new Set(), comps = [];
+  for(let x = x0; x <= x1; x++)
+    for(let y = y0; y <= y1; y++)
+      for(let z = z0; z <= z1; z++){
+        const sk = key(x,y,z);
+        if(seen.has(sk) || !isAir(x,y,z)) continue;
+        let size = 0, sx = 0, sy = 0, sz = 0;
+        const q = [[x,y,z]];
+        seen.add(sk);
+        while(q.length){
+          const c = q.pop(), cx = c[0], cy = c[1], cz = c[2];
+          size++; sx += cx; sy += cy; sz += cz;
+          for(const d of N6){
+            const nx = cx + d[0], ny = cy + d[1], nz = cz + d[2];
+            if(nx < x0 || nx > x1 || ny < y0 || ny > y1 || nz < z0 || nz > z1) continue;
+            const nk = key(nx,ny,nz);
+            if(seen.has(nk) || !isAir(nx,ny,nz)) continue;
+            seen.add(nk); q.push([nx,ny,nz]);
+          }
+        }
+        comps.push({ size, cx: sx/size, cy: sy/size, cz: sz/size });
+      }
+  comps.sort((a,b)=> b.size - a.size);
+  let totalAir = 0; for(const c of comps) totalAir += c.size;
+  let islands = 0; for(let i = 1; i < comps.length; i++){ if(comps[i].size >= (minComp || 1)) islands += comps[i].size; }
+  return { components: comps.length, totalAir, largest: comps.length ? comps[0].size : 0,
+           islands, islandRatio: totalAir ? islands / totalAir : 0, comps };
+}
+// 把体积 >= 2 的孤岛（非最大分量）用直线隧道连到主分量质心；carve(x,y,z) 负责置空。返回打通数。
+function carveLinks(stats, carve){
+  if(stats.comps.length <= 1) return 0;
+  const main = stats.comps[0];
+  let linked = 0;
+  for(let i = 1; i < stats.comps.length; i++){
+    const c = stats.comps[i];
+    if(c.size < 2) continue;                       // 单格气泡不值得修
+    const dist = Math.hypot(main.cx - c.cx, main.cy - c.cy, main.cz - c.cz);
+    const steps = Math.max(1, Math.ceil(dist * 2)); // 0.5 格步进，斜线不漏格
+    for(let s = 0; s <= steps; s++){
+      const t = s / steps;
+      const ix = Math.round(c.cx + (main.cx - c.cx) * t);
+      const iy = Math.round(c.cy + (main.cy - c.cy) * t);
+      const iz = Math.round(c.cz + (main.cz - c.cz) * t);
+      carve(ix, iy, iz);
+      carve(ix, iy + 1, iz);                        // 头顶让位：2 格高可通行
+      carve(ix + 1, iy, iz); carve(ix - 1, iy, iz); // 水平加粗：拐角不卡身位
+      carve(ix, iy, iz + 1); carve(ix, iy, iz - 1);
+    }
+    linked++;
+  }
+  return linked;
+}
+const CAVE_SCAN_R = 40;           // 连通化窗口半径（出生点周围；窗口外区块按原始噪声生成）
+let caveLinks = new Map();        // 生成期修正层：隧道格 → voxelColor 置空（在玩家 edits 之外）
+function bakeCaveLinks(){
+  caveLinks = new Map();
+  if(!cavesOn) return caveLinks;
+  const R = CAVE_SCAN_R, Y1 = 20; // amp 默认 12 → heightAt ≤ 16，y 上限 20 足够
+  const isAir = (x,y,z)=>{
+    const h = heightAt(x,z);
+    return y < h - 2 && caveAt(x,y,z);            // 与 voxelColor 洞穴判定一致（dirt 层以下才算洞）
+  };
+  const stats = caveStats(isAir, -R, R, 0, Y1, -R, R, 2);
+  if(stats.comps.length <= 1) return caveLinks;
+  carveLinks(stats, (x,y,z)=> caveLinks.set(key(x,y,z), true));
+  return caveLinks;
+}
+
 // ---------- 体素存储（无限世界） ----------
 const PALETTE = {
   grass: 0x6ab04c, dirt: 0x8a5a2b, stone: 0x8d949c, iron: 0xb0b8c0, gold: 0xffd24a,
@@ -381,6 +455,7 @@ function heightAt(x, z){ return Math.floor(fbm(x*0.08 + 10, z*0.08 + 10) * amp) 
 function voxelColor(x, y, z){
   const k = key(x,y,z);
   if(edits.has(k)) return edits.get(k);          // 编辑优先
+  if(caveLinks.has(k)) return null;              // 生成期洞穴连通层（隧道挖穿 dirt 层保证 2 格高可通行）
   const h = heightAt(x, z);
   if(y > h) return null;
   if(y === h){
@@ -3518,6 +3593,7 @@ window.addEventListener('keydown', e=>{
   else if((e.ctrlKey || e.metaKey) && (k === 'y' || (k === 'z' && e.shiftKey))){ e.preventDefault(); if(redoEdit()) flash('已重做'); else flash('无可重做'); }
 });
 $('amp').oninput = e=>{ amp=+e.target.value; SNOW_LINE = Math.floor(amp*0.7)+4; $('ampVal').textContent=amp;
+  bakeCaveLinks();                              // 地形高度变 → 洞穴分布变 → 隧道层重算
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('regen').onclick = ()=>{ edits.clear(); falling.clear(); lavaCol.clear(); for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); } };
 $('exportObj').onclick = ()=>{ const obj = exportOBJ(edits, key, PALETTE); downloadBlob('voxel-world.obj', new Blob([obj], { type: 'text/plain' })); flash('已导出 OBJ（'+edits.size+' 个方块）'); };
@@ -3547,6 +3623,7 @@ $('dayBtn').onclick = ()=>{
 };
 $('caves').onchange = e=>{
   cavesOn = e.target.checked;
+  bakeCaveLinks();                              // 开洞穴时重算连通层；关洞穴时 bake 内部直接清空
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
 };
 $('fall').onchange = e=>{ fallOn = e.target.checked; };
@@ -3688,6 +3765,7 @@ function tick(){
   renderer.render(scene, camera);
 }
 resize();
+bakeCaveLinks();   // 洞穴连通化：出生窗口孤岛隧道（首次建 chunk 前就绪，与玩家 edits 存档无关）
 ensureChunks();
 // 掉落方块模拟：悬空的沙/砾石每隔一段时间下落一格（若下方被占则停）
 function simulateFalling(){
