@@ -204,7 +204,9 @@ function stepWater(water, t, maxDepth){
     let sum = S, cnt = lowers.length + 1;
     for(const [,s] of lowers) sum += s;
     const avg = Math.floor(sum / cnt);
-    const out = S - avg;                           // 本格应下降的体积
+    let out = S - avg;                             // 本格应下降的体积
+    const own = S - t(x, z);                       // 本格实有水量
+    if(out > own) out = own;                       // 超排封顶：avg 低于本格地形时公式会多排，破坏体积守恒
     if(out <= 0) continue;
     give(k, -out);
     const per = Math.floor(out / lowers.length), rem = out - per*lowers.length;
