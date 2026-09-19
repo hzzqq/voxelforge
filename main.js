@@ -3708,6 +3708,37 @@ function inWaterAt(x, y, z, water, wkeyFn){
   return s != null && y <= s;
 }
 
+// ---------- 按群系天气（雨/雪粒子）：纯函数，供 tick 调用与测试 ----------
+// 降水窗口：20s 一个相位窗，hash(phase,7) < 0.35 时该窗有降水（约 35% 时间有天气）；
+// 群系决定形态：沙漠不降水；冷群系（taiga/tundra/alpine）下雪；其余湿润群系下雨。
+// 确定性由整数哈希保证——同相位窗内天气稳定，跨窗切换自然。
+function weatherFor(biome, phase){
+  if(hash(phase, 7) >= 0.35) return 'clear';
+  if(biome === 'desert') return 'clear';
+  return (biome === 'taiga' || biome === 'tundra' || biome === 'alpine') ? 'snow' : 'rain';
+}
+const W_SPAWN_R = 26, W_SPAWN_H = 18, W_RAIN_SPEED = 22, W_SNOW_SPEED = 3.2;
+// 粒子出生点：玩家为中心的水平圆盘（面积均匀：半径取 sqrt(hash)）+ 头顶 6..6+H 高度，确定性由 hash(i,phase) 保证
+function spawnParticle(i, phase, cx, cy, cz){
+  const r = Math.sqrt(hash(i * 7 + 1, phase)) * W_SPAWN_R;
+  const a = hash(i * 13 + 5, phase) * Math.PI * 2;
+  return { x: cx + Math.cos(a) * r, y: cy + 6 + hash(i * 17 + 9, phase) * W_SPAWN_H, z: cz + Math.sin(a) * r };
+}
+// 单步下落：雨垂直匀速；雪慢速 + 水平正弦摆动（相位掺 z 使粒子互不同步）；
+// 落至地面 gy 以下返回 false，由调用方回收重生
+function stepParticle(p, dt, type, gy, t){
+  p.y -= (type === 'rain' ? W_RAIN_SPEED : W_SNOW_SPEED) * dt;
+  if(type === 'snow') p.x += Math.sin(t * 1.7 + p.z * 0.35) * dt * 1.1;
+  return p.y > gy;
+}
+// 粒子地面高度：地形顶/水面顶取高者 + 0.5（方块以整数坐标为中心，表面在 +0.5）
+function groundYAt(x, z){
+  const fx = Math.floor(x), fz = Math.floor(z);
+  const h = heightAt(fx, fz);
+  const w = waterCol.get(wkey(fx, fz));
+  return Math.max(h, (w == null) ? h : w) + 0.5;
+}
+
 // ---------- 昼夜循环 ----------
 let dayNight = false, dayT = 0;
 const DAY_SPEED = 0.06;
@@ -3797,6 +3828,8 @@ $('light').onchange = e=>{
   lightOn = e.target.checked;
   for(const [k] of chunks){ const [cx,cz]=k.split(',').map(Number); rebuildChunk(cx,cz); }
 };
+// 按群系天气开关：关闭隐藏粒子（池/材质保留，重开即恢复）
+$('weather').onchange = e=>{ weatherOn = e.target.checked; };
 // ---------- 世界存档（localStorage：地形种子 + 洞穴开关 + 编辑）----------
 function flash(msg){ const m = $('mode'); const old = m.textContent; m.textContent = msg; setTimeout(()=>{ m.textContent = walkMode ? '模式: 行走(重力)' : '模式: 添加'; }, 1500); }
 $('saveW').onclick = ()=>{
@@ -3903,6 +3936,21 @@ function resize(){
 }
 window.addEventListener('resize', resize);
 let lastCx = 1e9, lastCz = 1e9;
+// ---------- 天气粒子渲染：单 Points 池，材质按雨/雪切换，clear 时隐藏 ----------
+let weatherOn = true, weatherPhase = -1, weatherType = 'clear';
+const W_N = 460;
+const wGeo = new THREE.BufferGeometry();
+const wPos = new Float32Array(W_N * 3);
+wGeo.setAttribute('position', new THREE.BufferAttribute(wPos, 3));
+const wMat = new THREE.PointsMaterial({ color: 0x8fb3d9, size: 0.13, transparent: true, opacity: 0.65, sizeAttenuation: true });
+const wPoints = new THREE.Points(wGeo, wMat);
+wPoints.frustumCulled = false; wPoints.visible = false;
+scene.add(wPoints);
+const wParts = [];
+for(let i = 0; i < W_N; i++){
+  const p = spawnParticle(i, 0, 0, 0, 0); p.i = i; wParts.push(p);
+}
+
 let lastTick = performance.now();
 function tick(){
   requestAnimationFrame(tick);
@@ -3957,6 +4005,31 @@ function tick(){
     sun.intensity = 0.15 + dayFactor * 1.3;
     hemi.intensity = 0.25 + dayFactor * 0.8;
   }
+  // 按群系天气：相位窗 20s；群系按玩家位置实时采样（跨群系边界即时切换形态）；
+  // 地下（玩家低于地面）不渲染降水；雨/雪仅切换材质参数与下落速度，粒子池复用
+  if(weatherOn){
+    const px = camera.position.x, py = camera.position.y, pz = camera.position.z;
+    const phase = Math.floor(now / 20000);
+    if(phase !== weatherPhase) weatherPhase = phase;
+    weatherType = weatherFor(biomeAt(Math.floor(px), Math.floor(pz)), phase);
+    const underground = py < groundYAt(px, pz) + 0.5;
+    wPoints.visible = !underground && weatherType !== 'clear';
+    if(wPoints.visible){
+      if(weatherType === 'rain'){ wMat.color.setHex(0x8fb3d9); wMat.size = 0.13; wMat.opacity = 0.65; }
+      else { wMat.color.setHex(0xffffff); wMat.size = 0.22; wMat.opacity = 0.9; }
+      const t = now / 1000;
+      for(let i = 0; i < W_N; i++){
+        const p = wParts[i];
+        const far = Math.hypot(p.x - px, p.z - pz) > W_SPAWN_R * 1.7;
+        if(!stepParticle(p, dt, weatherType, groundYAt(p.x, p.z), t) || far){
+          const np = spawnParticle(p.i, weatherPhase, px, py, pz);
+          p.x = np.x; p.y = np.y; p.z = np.z;
+        }
+        wPos[i*3] = p.x; wPos[i*3+1] = p.y; wPos[i*3+2] = p.z;
+      }
+      wGeo.attributes.position.needsUpdate = true;
+    }
+  } else if(wPoints.visible) wPoints.visible = false;
   const cx = Math.floor(controls.target.x / CHUNK), cz = Math.floor(controls.target.z / CHUNK);
   if(cx !== lastCx || cz !== lastCz){ lastCx = cx; lastCz = cz; ensureChunks(); }
   renderer.render(scene, camera);
