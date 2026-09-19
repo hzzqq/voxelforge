@@ -21,10 +21,10 @@ controls.enableDamping = true;
 const skyMat = new THREE.ShaderMaterial({
   side: THREE.BackSide,
   depthWrite: false,
-  uniforms: { uSun: { value: new THREE.Vector3(0.55, 0.72, -0.42).normalize() }, uDay: { value: 1.0 } },
+  uniforms: { uSun: { value: new THREE.Vector3(0.55, 0.72, -0.42).normalize() }, uDay: { value: 1.0 }, uDim: { value: 1.0 } },
   vertexShader: `varying vec3 vDir; void main(){ vDir = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
   fragmentShader: `
-    varying vec3 vDir; uniform vec3 uSun; uniform float uDay;
+    varying vec3 vDir; uniform vec3 uSun; uniform float uDay; uniform float uDim;
     void main(){
       vec3 d = normalize(vDir);
       vec3 zenith = mix(vec3(0.02,0.03,0.07), vec3(0.20,0.42,0.78), uDay);
@@ -35,6 +35,7 @@ const skyMat = new THREE.ShaderMaterial({
       else col = mix(horizon, ground, pow(clamp(-d.y,0.0,1.0),0.5));
       float s = max(dot(d, uSun), 0.0);
       col += (vec3(1.0,0.95,0.8) * pow(s, 800.0) + vec3(0.5,0.45,0.35) * pow(s, 8.0)) * uDay;
+      col *= uDim;
       gl_FragColor = vec4(col, 1.0);
     }`
 });
@@ -3739,6 +3740,34 @@ function groundYAt(x, z){
   return Math.max(h, (w == null) ? h : w) + 0.5;
 }
 
+// ---------- 天空氛围：群系雾色 × 天气密度 × 昼夜修正（纯函数，供 tick 调用与测试） ----------
+// 群系基础雾色（线性 RGB）：沙漠沙尘暖黄 / 丛林湿润青绿 / 冷群系雪白蓝 / 海岸偏白 / 默认淡蓝；
+// 天气修正雾距与变暗：雨近而浓（24..90·dim 0.55）、雪次之（30..120·0.85）、晴开朗（60..220·1）；
+// 昼夜按 dayFactor 把雾色压向夜色（k = 0.18 + 0.82·d），变暗倍率 dim 只描述天气不随昼夜变。
+function skyMood(biome, weather, dayFactor){
+  const base = (biome === 'desert') ? [0.82, 0.72, 0.52]
+    : (biome === 'jungle') ? [0.58, 0.72, 0.62]
+    : (biome === 'savanna') ? [0.78, 0.74, 0.55]
+    : (biome === 'taiga' || biome === 'tundra' || biome === 'alpine') ? [0.78, 0.84, 0.92]
+    : (biome === 'beach') ? [0.78, 0.85, 0.92]
+    : [0.62, 0.72, 0.84];   // plains / forest
+  const win = (weather === 'rain') ? [24, 90] : (weather === 'snow') ? [30, 120] : [60, 220];
+  const dim = (weather === 'rain') ? 0.55 : (weather === 'snow') ? 0.85 : 1.0;
+  const d = Math.max(0, Math.min(1, dayFactor == null ? 1 : dayFactor));
+  const k = 0.18 + 0.82 * d;
+  return { fog: [base[0] * k, base[1] * k, base[2] * k], fogNear: win[0], fogFar: win[1], dim: dim };
+}
+// 氛围平滑过渡：当前值向目标按 k 插值（k=1 直达 / k=0 保持），天气切窗/跨群系/昼夜渐变不跳变
+function lerpMood(cur, target, k){
+  const mix = (a, b)=> a + (b - a) * k;
+  return {
+    fog: [mix(cur.fog[0], target.fog[0]), mix(cur.fog[1], target.fog[1]), mix(cur.fog[2], target.fog[2])],
+    fogNear: mix(cur.fogNear, target.fogNear),
+    fogFar: mix(cur.fogFar, target.fogFar),
+    dim: mix(cur.dim, target.dim)
+  };
+}
+
 // ---------- 昼夜循环 ----------
 let dayNight = false, dayT = 0;
 const DAY_SPEED = 0.06;
@@ -3952,6 +3981,8 @@ for(let i = 0; i < W_N; i++){
 }
 
 let lastTick = performance.now();
+// 天空氛围当前值（初始 = scene.fog 初始色 0x9fb6d4 + 晴朗雾距，避免开场跳变）
+let moodCur = { fog: [0.6235, 0.7137, 0.8314], fogNear: 60, fogFar: 220, dim: 1 };
 function tick(){
   requestAnimationFrame(tick);
   const now = performance.now();
@@ -4030,6 +4061,20 @@ function tick(){
       wGeo.attributes.position.needsUpdate = true;
     }
   } else if(wPoints.visible) wPoints.visible = false;
+  // 天空氛围：群系雾色 × 天气密度 × 昼夜修正，向目标平滑过渡（天气切窗/跨群系不跳变）；
+  // 天气开关关闭时按晴朗计算（粒子与氛围同步收回）；雾距/雾色/天空变暗/灯光四路联动
+  {
+    const wt = weatherOn ? weatherType : 'clear';
+    const dayFactor = skyMat.uniforms.uDay.value;
+    const target = skyMood(biomeAt(Math.floor(camera.position.x), Math.floor(camera.position.z)), wt, dayFactor);
+    moodCur = lerpMood(moodCur, target, Math.min(1, dt * 2.5));
+    scene.fog.color.setRGB(moodCur.fog[0], moodCur.fog[1], moodCur.fog[2]);
+    scene.fog.near = moodCur.fogNear;
+    scene.fog.far = moodCur.fogFar;
+    skyMat.uniforms.uDim.value = moodCur.dim;
+    hemi.intensity = moodCur.dim * (dayNight ? 0.25 + dayFactor * 0.8 : 0.95);
+    sun.intensity = moodCur.dim * (dayNight ? 0.15 + dayFactor * 1.3 : 1.3);
+  }
   const cx = Math.floor(controls.target.x / CHUNK), cz = Math.floor(controls.target.z / CHUNK);
   if(cx !== lastCx || cz !== lastCz){ lastCx = cx; lastCz = cz; ensureChunks(); }
   renderer.render(scene, camera);
